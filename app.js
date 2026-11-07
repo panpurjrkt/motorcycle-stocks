@@ -261,6 +261,82 @@ var StockLib = (function () {
     return g;
   };
 
+  /* ---- live scanning: only 1D barcodes, only plausible part codes ---- */
+  // Yamalube labels carry a QR (a web link) next to the 1D barcode. The live camera reads ONLY the 1D formats; QR is allowed in the photo path alone.
+  L.ONE_D_NATIVE = ['code_128', 'code_39', 'code_93', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'itf', 'codabar'];   // BarcodeDetector names
+  L.ONE_D_ZX = ['CODE_128', 'CODE_39', 'CODE_93', 'EAN_13', 'EAN_8', 'UPC_A', 'UPC_E', 'ITF', 'CODABAR'];       // ZXing BarcodeFormat names
+  /** ZXing hints: 1D formats only (QR added only when withQr), TRY_HARDER on. ZX = the ZXing global. */
+  L.zxHints = function (ZX, withQr) {
+    var h = new Map(), F = ZX.BarcodeFormat, list = L.ONE_D_ZX.map(function (n) { return F[n]; });
+    if (withQr) list.push(F.QR_CODE);
+    h.set(ZX.DecodeHintType.POSSIBLE_FORMATS, list);
+    h.set(ZX.DecodeHintType.TRY_HARDER, true);
+    return h;
+  };
+  /** Decodes one luminance source (a canvas source in the page) with ZXing's MultiFormatReader: the text, or '' when nothing was found. */
+  L.zxDecodeSource = function (ZX, source, hints) {
+    try {
+      var bitmap = new ZX.BinaryBitmap(new ZX.HybridBinarizer(source)), reader = new ZX.MultiFormatReader();
+      return str(reader.decode(bitmap, hints).getText());
+    } catch (e) { return ''; }
+  };
+  /** The part of the video that is decoded: a wide, short band in the middle (90% of the width x 35% of the height), at the video's full resolution. */
+  L.bandRect = function (vw, vh) {
+    var sw = Math.max(1, Math.round(vw * 0.9)), sh = Math.max(1, Math.round(vh * 0.35));
+    return { sx: Math.round((vw - sw) / 2), sy: Math.round((vh - sh) / 2), sw: sw, sh: sh };
+  };
+  /** A native BarcodeDetector answer ([{rawValue, format}]) -> the first 1D read ('' when there is only a QR or nothing) */
+  L.pickLive = function (results) {
+    var r = (results || []).filter(function (x) { return x && x.rawValue && L.ONE_D_NATIVE.indexOf(x.format) >= 0; })[0];
+    return r ? str(r.rawValue) : '';
+  };
+  /** Photo path: when a photo holds both a 1D barcode and a QR, the 1D one wins; a QR alone is still returned. */
+  L.preferOneD = function (results) {
+    var all = (results || []).filter(function (x) { return x && x.rawValue; });
+    var one = all.filter(function (x) { return L.ONE_D_NATIVE.indexOf(x.format) >= 0; })[0] || all[0];
+    return one ? str(one.rawValue) : '';
+  };
+  /** A read that can be a part code: no link, and after normScan only A-Z / 0-9, 5 to 20 characters. */
+  L.isPlausibleCode = function (text) {
+    var raw = str(text);
+    if (/:\/\/|www\./i.test(raw)) return false;
+    return /^[A-Z0-9]{5,20}$/.test(L.normScan(raw));
+  };
+  /** 'empty' (nothing read) | 'ignored' (something read that is not a part code: silently dropped) | 'plausible' (+ n = its normalised text) */
+  L.readClass = function (text) {
+    if (!str(text)) return { kind: 'empty', n: '' };
+    if (!L.isPlausibleCode(text)) return { kind: 'ignored', n: '' };
+    return { kind: 'plausible', n: L.normScan(text) };
+  };
+  /** The "not found" card needs the same plausible code twice in a row (a different plausible code starts the count again; empty frames do not reset it). */
+  L.makeConfirm = function () {
+    var c = { last: '', n: 0 };
+    c.add = function (norm) { if (norm === c.last) c.n++; else { c.last = norm; c.n = 1; } return c.n >= 2; };
+    c.reset = function () { c.last = ''; c.n = 0; };
+    return c;
+  };
+  /** After afterMs (4 s) of only ignored reads the viewfinder hint shows; a plausible read, or 2.5 s without any ignored read, hides it again. feed(kind, nowMs) -> show? */
+  L.makeIgnoreHint = function (afterMs, quietMs) {
+    afterMs = afterMs || 4000; quietMs = quietMs || 2500;
+    var h = { since: 0, last: 0 };
+    h.feed = function (kind, now) {
+      if (kind === 'plausible') { h.since = 0; h.last = 0; return false; }
+      if (kind === 'ignored') { if (!h.since || now - h.last > quietMs) h.since = now; h.last = now; }
+      else if (h.since && now - h.last > quietMs) h.since = 0;
+      return h.since > 0 && now - h.since >= afterMs;
+    };
+    return h;
+  };
+  /** Camera zoom: from the track capabilities ({zoom:{min,max,step}}) -> {min, max, def}; def = about 2x (or the maximum when it is lower). null when the camera cannot zoom. */
+  L.zoomPlan = function (caps) {
+    var z = caps && caps.zoom;
+    if (!z || typeof z !== 'object' || !(Number(z.max) > Number(z.min))) return null;
+    var min = Number(z.min) || 1, max = Number(z.max);
+    return { min: min, max: max, def: Math.max(min, Math.min(2, max)) };
+  };
+  L.zoomLabel = function (z) { return (Math.round(z * 10) / 10) + '×'; };
+  L.HINT_1D = 'เล็งที่บาร์โค้ดแท่ง (เส้นขาวดำ) ไม่ใช่ QR';
+
   /* ---- the link / the browser ---- */
   /** LINE's in-app browser (UA contains " Line/") has no camera: the app tells the person to open it in the phone's browser */
   L.isLineBrowser = function (ua) { return /\sLine\//.test(str(ua)); };
@@ -309,7 +385,6 @@ if (typeof document !== 'undefined') (function () {
   var L = StockLib;
   var ZXING_URL = 'https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js';
   var ZXING_SRI = 'sha384-BzBxP10ZE72aitqj5UMmUsbKFliP/DZqA8Wq+BNNhlIJDGoEd1tpkMYXOg9+n6sB';
-  var BAR_FORMATS = ['code_128', 'code_39', 'ean_13', 'qr_code'];
   var SYNC_MS = 90000, WAIT_POLL_MS = 25000;
 
   var T = L.parseHash(location.hash);
@@ -732,14 +807,16 @@ if (typeof document !== 'undefined') (function () {
     var big = el('div', 'bigq', String(card.qty)); big.id = 'bigqty'; big.setAttribute('aria-live', 'polite'); box.appendChild(big);
     box.appendChild(el('div', 'sub', 'ชิ้นที่นับได้ (สแกนบาร์โค้ดทีละชิ้น)')).style.textAlign = 'center';
     var warn = el('div', card.warn ? 'msg err' : ''); warn.id = 'pieceWarn'; warn.textContent = card.warn; box.appendChild(warn);
-    var vf = el('div', 'vf'); var video = el('video'); video.id = 'pieceVideo'; video.setAttribute('playsinline', ''); video.setAttribute('autoplay', ''); video.muted = true; vf.appendChild(video); vf.appendChild(el('div', 'frame'));
+    var vf = el('div', 'vf'); vf.id = 'pieceVf'; var video = el('video'); video.id = 'pieceVideo'; video.setAttribute('playsinline', ''); video.setAttribute('autoplay', ''); video.muted = true; vf.appendChild(video); vf.appendChild(el('div', 'frame'));
     var torch = el('button', 'torch', 'ไฟฉาย'); torch.type = 'button'; torch.id = 'pieceTorch'; torch.hidden = true; vf.appendChild(torch);
+    var zoom = el('button', 'zoom', '2×'); zoom.type = 'button'; zoom.id = 'pieceZoom'; zoom.hidden = true; vf.appendChild(zoom);
     vf.hidden = !!card.camMsg; box.appendChild(vf);
+    var ph = el('div', 'msg err', L.HINT_1D); ph.id = 'pieceHint'; ph.hidden = true; box.appendChild(ph);
     var cm = el('div', card.camMsg ? 'msg err' : ''); cm.id = 'camMsg'; cm.textContent = card.camMsg; box.appendChild(cm);
     if (card.camMsg) {
       var lab = el('label', 'btn alt', ''); lab.appendChild(el('span', '', 'ถ่ายรูปบาร์โค้ด นับ 1 ชิ้น'));
       var f = el('input'); f.type = 'file'; f.accept = 'image/*'; f.setAttribute('capture', 'environment'); f.style.cssText = 'position:absolute;left:-9999px';
-      f.addEventListener('change', function () { var file = f.files && f.files[0]; f.value = ''; if (file) decodePhoto(file, function (text, why) { if (text) onPiece(text); else pieceWarn(why || 'อ่านบาร์โค้ดจากรูปไม่ได้'); }); });
+      f.addEventListener('change', function () { var file = f.files && f.files[0]; f.value = ''; if (file) decodePhoto(file, function (text, why) { if (text && !L.isPlausibleCode(text)) pieceWarn(NOT_A_PART); else if (text) onPiece(text); else pieceWarn(why || 'อ่านบาร์โค้ดจากรูปไม่ได้'); }); });
       lab.appendChild(f); box.appendChild(lab);
     }
     var g = el('div', 'gap2');
@@ -752,8 +829,13 @@ if (typeof document !== 'undefined') (function () {
 
   function startPieceCamera() {
     var v = $('pieceVideo'); if (!v || card.camMsg) return;
-    var mine = card;
-    camStart(v, onPiece, function (msg) { if (card === mine) { card.camMsg = msg; drawCard(); } }, 700, $('pieceTorch'));
+    var mine = card, hint = L.makeIgnoreHint(), hintEl = $('pieceHint');
+    camStart(v, function (text) {
+      var k = L.readClass(text), now = Date.now();
+      if (hintEl) hintEl.hidden = !hint.feed(k.kind, now);
+      // an implausible read (a QR link, junk) is just an empty frame: ignored silently, the piece gate keeps its own count of empty frames
+      if (cam.gate.feed(k.kind === 'plausible' ? text : '', now)) onPiece(text);
+    }, function (msg) { if (card === mine) { card.camMsg = msg; drawCard(); } }, { torch: $('pieceTorch'), zoom: $('pieceZoom'), frame: $('pieceVf') });
   }
   /** one scan in "scan each piece" mode: the same code adds 1 (once it left the view for ~0.7 s); a different code warns and does not count */
   function onPiece(text) {
@@ -800,9 +882,16 @@ if (typeof document !== 'undefined') (function () {
   function openScan() {
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
     homeMsg('', '');
-    $('scan').hidden = false; $('scanNote').textContent = 'เล็งบาร์โค้ดให้อยู่ในกรอบ';
-    camStart($('scanVideo'), function (text) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(text, true); },
-      function (msg) { $('scanNote').textContent = msg; }, 700, $('scanTorch'));
+    $('scan').hidden = false; $('scanNote').textContent = 'เล็งบาร์โค้ดให้อยู่ในกรอบ'; $('scanHint').hidden = true;
+    var hint = L.makeIgnoreHint(), confirm = L.makeConfirm();
+    camStart($('scanVideo'), function (text) {
+      var k = L.readClass(text), now = Date.now();
+      $('scanHint').hidden = !hint.feed(k.kind, now);
+      if (k.kind !== 'plausible') return;                                   // empty or implausible (a QR link, junk): ignored silently, keep scanning
+      var p = L.findPart(M, text);
+      if (p >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(text, true); return; }
+      if (confirm.add(k.n)) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(text, true); }   // a plausible code that is not in the list: only after the same code was read twice in a row
+    }, function (msg) { $('scanNote').textContent = msg; }, { torch: $('scanTorch'), zoom: $('scanZoom'), frame: $('scanVf') });
   }
   function closeScan() { camStop(); $('scan').hidden = true; }
   function lookup(code, viaScan) {
@@ -815,11 +904,13 @@ if (typeof document !== 'undefined') (function () {
   function goCode() { var v = $('codeIn').value; if (!v.trim()) return; $('codeIn').value = ''; lookup(v, false); }
 
   /* ---------------- camera (live) with photo fallback ---------------- */
-  var cam = { stream: null, timer: null, reader: null, gate: null, torch: false }, camRun = 0, zxLoading = null;
-  function makeDetector() {
+  // Live mode reads 1D barcodes only (never QR), from a wide centre band of the video at full resolution. Every decode result (or "nothing") goes to
+  // onFrame(text); the callers decide what counts (the piece gate, the twice-in-a-row rule). One loop, about 8-10 decodes a second.
+  var cam = { stream: null, timer: null, gate: null, torch: false, zoom: 0 }, camRun = 0, zxLoading = null;
+  function makeDetector(formats) {
     try {
       if (!('BarcodeDetector' in window)) return null;
-      try { return new window.BarcodeDetector({ formats: BAR_FORMATS }); } catch (e1) { return new window.BarcodeDetector(); }
+      try { return new window.BarcodeDetector({ formats: formats }); } catch (e1) { return new window.BarcodeDetector(); }
     } catch (e) { return null; }
   }
   function loadZXing(cb) {
@@ -835,12 +926,6 @@ if (typeof document !== 'undefined') (function () {
       document.head.appendChild(s);
     } catch (e) { done(false); }
   }
-  function zxHints() {
-    var h = new Map(), F = window.ZXing.BarcodeFormat;
-    h.set(window.ZXing.DecodeHintType.POSSIBLE_FORMATS, [F.CODE_128, F.CODE_39, F.EAN_13, F.QR_CODE]);
-    h.set(window.ZXing.DecodeHintType.TRY_HARDER, true);
-    return h;
-  }
   function camMessage(e) {
     var n = e && e.name ? e.name : '';
     if (n === 'NotAllowedError' || n === 'SecurityError' || n === 'PermissionDeniedError') return 'เปิดกล้องไม่ได้ (ยังไม่ได้อนุญาตกล้อง) กรุณาอนุญาตกล้องให้เว็บนี้ในการตั้งค่าของเบราว์เซอร์ หรือใช้ปุ่ม "ถ่ายรูปบาร์โค้ด" หรือพิมพ์รหัสแทน';
@@ -848,68 +933,79 @@ if (typeof document !== 'undefined') (function () {
     if (e && e.message === 'nolib') return 'โหลดตัวอ่านบาร์โค้ดไม่ได้ (ตรวจอินเทอร์เน็ต) ใช้ปุ่ม "ถ่ายรูปบาร์โค้ด" หรือพิมพ์รหัสแทน';
     return 'เปิดกล้องสดไม่ได้ ใช้ปุ่ม "ถ่ายรูปบาร์โค้ด" หรือพิมพ์รหัสแทน';
   }
-  /** one decode callback: text = the code in view ('' = nothing). StockLib.makeGate decides (consecutive empty callbacks AND a time floor) whether it counts. */
-  function gate(text, onCode) {
-    if (cam.gate && cam.gate.feed(text, Date.now())) { try { onCode(text); } catch (e) { /* ignore */ } }
-  }
   function camStop() {
     camRun++;
     clearTimeout(cam.timer); cam.timer = null;
-    try { if (cam.reader) cam.reader.reset(); } catch (e) { /* ignore */ }
-    cam.reader = null;
     try { if (cam.stream) cam.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) { /* ignore */ }
     cam.stream = null; cam.torch = false;
     var vs = document.querySelectorAll('video'); for (var i = 0; i < vs.length; i++) { try { vs[i].srcObject = null; } catch (e) { /* ignore */ } }
     var tb = document.querySelectorAll('.torch'); for (var j = 0; j < tb.length; j++) { tb[j].hidden = true; tb[j].classList.remove('on'); }
+    var zb = document.querySelectorAll('.zoom'); for (var k = 0; k < zb.length; k++) zb[k].hidden = true;
   }
-  /** shows the torch button only when the camera track can do it */
-  function setupTorch(stream, btn) {
-    if (!btn) return;
+  /** Track extras: continuous focus, the torch button, and a zoom button (default about 2x so the phone can be held 15-25 cm away). */
+  function setupTrack(stream, torchBtn, zoomBtn) {
     try {
       var track = stream.getVideoTracks()[0], caps = track && track.getCapabilities ? track.getCapabilities() : null;
-      if (!caps || !caps.torch) return;
-      btn.hidden = false;
-      btn.onclick = function () {
-        cam.torch = !cam.torch;
-        try { track.applyConstraints({ advanced: [{ torch: cam.torch }] }).then(function () { btn.classList.toggle('on', cam.torch); }, function () { cam.torch = false; btn.hidden = true; }); } catch (e) { cam.torch = false; btn.hidden = true; }
-      };
-    } catch (e) { /* no torch: fine */ }
+      if (!caps) return;
+      var apply = function (c) { try { var r = track.applyConstraints({ advanced: [c] }); if (r && r.catch) r.catch(function () { /* not supported: fine */ }); return r; } catch (e) { return null; } };
+      if (caps.focusMode && caps.focusMode.indexOf && caps.focusMode.indexOf('continuous') >= 0) apply({ focusMode: 'continuous' });
+      var zp = L.zoomPlan(caps);
+      if (zp && zoomBtn) {
+        cam.zoom = zp.def; apply({ zoom: zp.def });
+        zoomBtn.hidden = false; zoomBtn.textContent = L.zoomLabel(zp.def);
+        zoomBtn.onclick = function () { cam.zoom = cam.zoom > zp.min ? zp.min : zp.def; apply({ zoom: cam.zoom }); zoomBtn.textContent = L.zoomLabel(cam.zoom); };
+      }
+      if (torchBtn && caps.torch) {
+        torchBtn.hidden = false;
+        torchBtn.onclick = function () {
+          cam.torch = !cam.torch;
+          try { track.applyConstraints({ advanced: [{ torch: cam.torch }] }).then(function () { torchBtn.classList.toggle('on', cam.torch); }, function () { cam.torch = false; torchBtn.hidden = true; }); } catch (e) { cam.torch = false; torchBtn.hidden = true; }
+        };
+      }
+    } catch (e) { /* no extras: fine */ }
   }
-  function camStart(video, onCode, onFail, rearmMs, torchBtn) {
+  /** onFrame(text) gets every decode result ('' = nothing). opts: {torch, zoom, frame (the viewfinder element: its shape follows the decoded band)} */
+  function camStart(video, onFrame, onFail, opts) {
+    opts = opts || {};
     camStop();
     var run = camRun;
-    cam.gate = L.makeGate(rearmMs || 700);
+    cam.gate = L.makeGate(700);
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nocam');
-      navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false }).then(function (stream) {
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false }).then(function (stream) {
         if (run !== camRun) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
-        cam.stream = stream; video.srcObject = stream; setupTorch(stream, torchBtn);
+        cam.stream = stream; video.srcObject = stream; setupTrack(stream, opts.torch, opts.zoom);
         var p = video.play(); if (p && p.catch) p.catch(function () { /* autoplay refused: the stream still decodes */ });
-        var det = makeDetector();
-        if (det) { nativeLoop(det, video, run, onCode); return; }
+        var det = makeDetector(L.ONE_D_NATIVE);
+        if (det) { bandLoop(run, video, opts.frame, onFrame, function (canvas, cb) { try { det.detect(canvas).then(function (r) { cb(L.pickLive(r)); }, function () { cb(''); }); } catch (e) { cb(''); } }); return; }
         loadZXing(function (ok) {
           if (run !== camRun) return;
           if (!ok) { camStop(); onFail(camMessage(new Error('nolib'))); return; }
-          try {
-            cam.reader = new window.ZXing.BrowserMultiFormatReader(zxHints(), 300);
-            // every callback (a read, or "nothing found") goes through the gate; there is NO separate timer deciding that the code left the view
-            var pr = cam.reader.decodeFromStream(stream, video, function (res) { if (run === camRun) gate(res ? res.getText() : '', onCode); });
-            if (pr && typeof pr.catch === 'function') pr.catch(function (e) { if (run === camRun) { camStop(); onFail(camMessage(e)); } });
-          } catch (e) { camStop(); onFail(camMessage(e)); }
+          var hints = L.zxHints(window.ZXing, false);
+          bandLoop(run, video, opts.frame, onFrame, function (canvas, cb) { cb(L.zxDecodeSource(window.ZXing, new window.ZXing.HTMLCanvasElementLuminanceSource(canvas), hints)); });
         });
       }).catch(function (e) { if (run === camRun) { camStop(); onFail(camMessage(e)); } });
     } catch (e) { camStop(); onFail(camMessage(e)); }
   }
-  function nativeLoop(det, video, run, onCode) {
+  /** The decode loop: copy the centre band of the video (full resolution) to a canvas, decode it, hand the result on, wait ~100 ms, repeat. */
+  function bandLoop(run, video, frameEl, onFrame, decode) {
+    var canvas = document.createElement('canvas'), ctx = null, shaped = false;
     (function tick() {
       if (run !== camRun) return;
-      var next = function () { if (run === camRun) cam.timer = setTimeout(tick, 120); };
+      var again = function () { if (run === camRun) cam.timer = setTimeout(tick, 100); };
+      var vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) { again(); return; }
       try {
-        det.detect(video).then(function (r) { if (run === camRun) gate(r && r.length ? r[0].rawValue : '', onCode); next(); }, next);
-      } catch (e) { next(); }
+        var r = L.bandRect(vw, vh);
+        if (!ctx) { try { ctx = canvas.getContext('2d', { willReadFrequently: true }); } catch (e0) { ctx = canvas.getContext('2d'); } }
+        if (canvas.width !== r.sw || canvas.height !== r.sh) { canvas.width = r.sw; canvas.height = r.sh; }
+        if (!shaped && frameEl && frameEl.style) { shaped = true; frameEl.style.aspectRatio = r.sw + ' / ' + r.sh; }   // the viewfinder shows (about) the band that is decoded
+        ctx.drawImage(video, r.sx, r.sy, r.sw, r.sh, 0, 0, r.sw, r.sh);
+        decode(canvas, function (text) { if (run === camRun) { try { onFrame(text); } catch (e1) { /* ignore */ } } again(); });
+      } catch (e) { again(); }
     })();
   }
-  /** photo of a barcode -> text, decoded on the phone (cb(text) or cb('', thaiReason)) */
+  /** photo of a barcode -> text, decoded on the phone (cb(text) or cb('', thaiReason)). Here QR is allowed, and a 1D barcode wins when both are in the photo. */
   function decodePhoto(file, cb) {
     var url = URL.createObjectURL(file), img = new Image();
     img.onload = function () {
@@ -918,8 +1014,8 @@ if (typeof document !== 'undefined') (function () {
         c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
         c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
         URL.revokeObjectURL(url);
-        var det = makeDetector(), viaZX = function () { photoZX(c, cb); };
-        if (det) det.detect(c).then(function (r) { if (r && r.length && r[0].rawValue) cb(r[0].rawValue); else viaZX(); }, viaZX);
+        var det = makeDetector(L.ONE_D_NATIVE.concat(['qr_code'])), viaZX = function () { photoZX(c, cb); };
+        if (det) det.detect(c).then(function (r) { var t = L.preferOneD(r); if (t) cb(t); else viaZX(); }, viaZX);
         else viaZX();
       } catch (e) { cb('', 'อ่านรูปไม่ได้ ถ่ายใหม่หรือพิมพ์รหัสแทน'); }
     };
@@ -929,12 +1025,12 @@ if (typeof document !== 'undefined') (function () {
   function photoZX(canvas, cb) {
     loadZXing(function (ok) {
       if (!ok) { cb('', 'โหลดตัวอ่านบาร์โค้ดไม่ได้ (ตรวจอินเทอร์เน็ต) พิมพ์รหัสแทน'); return; }
-      try {
-        var reader = new window.ZXing.BrowserMultiFormatReader(zxHints());
-        reader.decodeFromImageUrl(canvas.toDataURL('image/jpeg', 0.92)).then(function (r) { cb(r.getText()); }, function () { cb('', 'อ่านบาร์โค้ดจากรูปไม่ได้ ถ่ายใหม่ให้ชัดขึ้น หรือพิมพ์รหัสแทน'); });
-      } catch (e) { cb('', 'อ่านบาร์โค้ดจากรูปไม่ได้ พิมพ์รหัสแทน'); }
+      var Z = window.ZXing, src = new Z.HTMLCanvasElementLuminanceSource(canvas);
+      var t = L.zxDecodeSource(Z, src, L.zxHints(Z, false)) || L.zxDecodeSource(Z, src, L.zxHints(Z, true));   // 1D first, QR only when there is no 1D barcode
+      if (t) cb(t); else cb('', 'อ่านบาร์โค้ดจากรูปไม่ได้ ถ่ายใหม่ให้ชัดขึ้น หรือพิมพ์รหัสแทน');
     });
   }
+  var NOT_A_PART = 'อ่านได้ แต่ไม่ใช่รหัสอะไหล่ (เช่น QR / ลิงก์) ถ่ายให้เห็นบาร์โค้ดแท่ง หรือพิมพ์รหัสแทน';
 
   /* ---------------- daily random count (same app, same queue) ---------------- */
   function renderDaily() {
@@ -1037,7 +1133,7 @@ if (typeof document !== 'undefined') (function () {
       var f = this.files && this.files[0]; this.value = '';
       if (!f) return;
       $('scanNote').textContent = 'กำลังอ่านรูป…';
-      decodePhoto(f, function (text, why) { if (text) { closeScan(); beep(); lookup(text, true); } else $('scanNote').textContent = why || 'อ่านบาร์โค้ดจากรูปไม่ได้'; });
+      decodePhoto(f, function (text, why) { if (text && !L.isPlausibleCode(text)) $('scanNote').textContent = NOT_A_PART; else if (text) { closeScan(); beep(); lookup(text, true); } else $('scanNote').textContent = why || 'อ่านบาร์โค้ดจากรูปไม่ได้'; });
     });
     $('tabFirst').addEventListener('click', function () { ST.tab = 'first'; ST.shelf = ''; renderChips(); renderList(); });
     $('tabSecond').addEventListener('click', function () { ST.tab = 'second'; ST.shelf = ''; renderChips(); renderList(); });
