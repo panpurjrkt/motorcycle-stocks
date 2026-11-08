@@ -387,10 +387,10 @@ var StockLib = (function () {
   var PHOTO_MAX_AGE = 10 * 60 * 1000;
   L.PHOTO_MAX_AGE = PHOTO_MAX_AGE;
   L.photoTooOld = function (lastModified, now) { return !lastModified || (now - lastModified) > PHOTO_MAX_AGE; };
-  /** Checks one daily card before it is queued (the same messages as the old page). d: {bulk, qty, crates, per, loose, foundAt, photo, lastModified, now} */
+  /** Checks one daily card before it is queued (the same messages as the old page). d: {crates, per, loose, foundAt, photo, lastModified, now} (qty only for a plain entry) */
   L.dailyCheck = function (d) {
     var answer, pieces;
-    if (d.bulk) {
+    if (d.qty === undefined || d.qty === null || d.crates !== undefined || d.per !== undefined || d.loose !== undefined) {   // the page always sends the crates x per-crate + loose entry (the plain qty form is only kept for the checks)
       if (str(d.crates) === '' && str(d.per) === '' && str(d.loose) === '') return { ok: false, error: 'กรุณากรอกจำนวนที่นับได้' };
       answer = { crates: str(d.crates), perCrate: str(d.per), loose: str(d.loose) };
       pieces = (+d.crates || 0) * (+d.per || 0) + (+d.loose || 0);
@@ -1214,25 +1214,21 @@ if (typeof document !== 'undefined') (function () {
     var sh = el('div', 'shelfchip'); sh.style.maxWidth = '100%'; sh.style.height = 'auto'; sh.style.padding = '4px 10px'; sh.style.alignSelf = 'flex-start';
     sh.appendChild(ic('map-pin')); sh.appendChild(el('span', '', 'ที่เก็บตามระบบ: ' + it.shelf)); c.appendChild(sh);
     if (it.seen && it.seen.length) c.appendChild(el('div', 'seen', 'เคยมีคนเจอที่: ' + it.seen.join(' · ')));
-    var qty, crates, per, loose, total;
+    var crates, per, loose, total;
     c.appendChild(el('div', 'hint', 'นับเป็นชิ้น ไม่ใช่ถุง/แพ็ค รวมทุกที่ที่เจอ'));
-    if (it.bulk) {
-      c.appendChild(el('div', 'hint', 'นับเป็นลัง×ชิ้นต่อลัง + เศษ'));
-      var g = el('div', 'row3'); c.appendChild(g);
-      [['ลัง', 'crates'], ['ชิ้น/ลัง', 'per'], ['เศษ', 'loose']].forEach(function (d) {
-        var i = numInput('0'); i.className = 'qty'; i.setAttribute('aria-label', d[0]);
-        var of = el('div', 'of'); of.appendChild(el('label', '', d[0])); of.appendChild(i); g.appendChild(of);
-        if (d[1] === 'crates') crates = i; else if (d[1] === 'per') per = i; else loose = i;
-      });
-      if (pf.answer) { crates.value = pf.answer.crates || ''; per.value = pf.answer.perCrate || ''; loose.value = pf.answer.loose || ''; }
-      total = el('div', 'total', 'รวม 0 ชิ้น'); c.appendChild(total);
-      var recalc = function () { total.textContent = 'รวม ' + ((+crates.value || 0) * (+per.value || 0) + (+loose.value || 0)) + ' ชิ้น'; };
-      [crates, per, loose].forEach(function (i) { i.addEventListener('input', recalc); }); recalc();
-    } else {
-      var qw = el('div', 'qtyone'); qw.appendChild(el('label', 'fl', 'จำนวนชิ้นที่เจอทั้งหมด ในทุกที่ (ไม่เจอเลยให้ใส่ 0)'));
-      qty = numInput('0'); qty.className = 'qty'; if (pf.answer && pf.answer.qty !== undefined) qty.value = pf.answer.qty;
-      var qof = el('div', 'of'); qof.appendChild(qty); qw.appendChild(qof); c.appendChild(qw);
-    }
+    // every item has the same entry (crates x pieces per crate + loose): nothing on the page says how big the stock is expected to be
+    c.appendChild(el('div', 'hint', 'นับเป็นลัง×ชิ้นต่อลัง + เศษ (ไม่มีลังให้ใส่แค่ช่อง เศษ)'));
+    var g = el('div', 'row3'); c.appendChild(g);
+    [['ลัง', 'crates'], ['ชิ้น/ลัง', 'per'], ['เศษ', 'loose']].forEach(function (d) {
+      var i = numInput('0'); i.className = 'qty'; i.setAttribute('aria-label', d[0]);
+      var of = el('div', 'of'); of.appendChild(el('label', '', d[0])); of.appendChild(i); g.appendChild(of);
+      if (d[1] === 'crates') crates = i; else if (d[1] === 'per') per = i; else loose = i;
+    });
+    if (pf.answer) { crates.value = pf.answer.crates || ''; per.value = pf.answer.perCrate || ''; loose.value = pf.answer.loose || (pf.answer.qty !== undefined ? pf.answer.qty : ''); }   // (an answer queued by the older page was a plain quantity)
+    total = el('div', 'total', 'รวม 0 ชิ้น'); c.appendChild(total);
+    var recalc = function () { total.textContent = 'รวม ' + ((+crates.value || 0) * (+per.value || 0) + (+loose.value || 0)) + ' ชิ้น'; };
+    [crates, per, loose].forEach(function (i) { i.addEventListener('input', recalc); }); recalc();
+
     var fld = el('div', 'field'); c.appendChild(fld);
     var pick = el('label', 'fbtn tint wide', ''); pick.appendChild(ic('camera')); var pl = el('span', '', 'ถ่ายรูป'); pick.appendChild(pl); fld.appendChild(pick);
     var file = el('input'); file.type = 'file'; file.accept = 'image/*'; file.setAttribute('capture', 'environment'); file.style.position = 'absolute'; file.style.left = '-9999px'; pick.appendChild(file);
@@ -1260,7 +1256,7 @@ if (typeof document !== 'undefined') (function () {
       if (!verified) { showErr('รอสักครู่ กำลังตรวจรหัส'); return; }
       showErr('');
       var now = Date.now();
-      var chk = L.dailyCheck({ bulk: it.bulk, qty: qty && qty.value, crates: crates && crates.value, per: per && per.value, loose: loose && loose.value, foundAt: foundAt.value, photo: st.photo, lastModified: st.lastModified, now: now });
+      var chk = L.dailyCheck({ crates: crates.value, per: per.value, loose: loose.value, foundAt: foundAt.value, photo: st.photo, lastModified: st.lastModified, now: now });
       if (!chk.ok) { if (chk.resetPhoto) resetPhoto(); showErr(chk.error); return; }
       delete prefill[it.id];
       enqueue('daily', L.dailyBody(it.id, chk.answer, foundAt.value, st.photo, st.lastModified, now), it.name);
