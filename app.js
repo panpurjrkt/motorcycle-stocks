@@ -123,6 +123,35 @@ var StockLib = (function () {
   };
 
   /**
+   * Suggestions while a code is typed. Returns { list, shown, total }: `list` = up to `max` (default 8) part indexes whose normalised code2 or code1 (part.codes, the data
+   * findPart uses; every part, counted or not) START with the typed text first, then those that CONTAIN it; each group is in order of the code that matched (then file
+   * order). `shown[i]` = the code that matched for list[i], as written in the data (what the row displays). `total` = how many parts match in all (more than the list when capped).
+   * The text goes through normScan (dashes, spaces, case do not matter); fewer than 2 normalised characters -> nothing.
+   */
+  L.suggestMatches = function (m, text, max) {
+    var n = L.normScan(text), lim = max === undefined ? 8 : max, starts = [], inside = [], i, j, none = { list: [], shown: [], total: 0 };
+    if (n.length < 2 || !m || !m.parts) return none;
+    for (i = 0; i < m.parts.length; i++) {
+      var part = m.parts[i], codes = part.codes, hit = null, k;
+      for (j = 0; j < codes.length; j++) {
+        k = codes[j].indexOf(n);
+        if (k === 0) { hit = { p: i, code: codes[j], at: 0 }; break; }
+        if (k > 0 && !hit) hit = { p: i, code: codes[j], at: k };
+      }
+      if (hit) (hit.at === 0 ? starts : inside).push(hit);
+    }
+    function byCode(a, b) { return a.code < b.code ? -1 : a.code > b.code ? 1 : a.p - b.p; }
+    var all = starts.sort(byCode).concat(inside.sort(byCode)), cut = lim > 0 ? all.slice(0, lim) : [];
+    function written(h) {   // the matched code as the data spells it (code2, else code1 without its leading apostrophe)
+      var pt = m.parts[h.p];
+      return L.normScan(pt.code2) === h.code ? pt.code2 : str(pt.c1).replace(/^['\u2018\u2019\u02bc`]+/, '');
+    }
+    return { list: cut.map(function (h) { return h.p; }), shown: cut.map(written), total: all.length };
+  };
+  /** Just the part indexes of L.suggestMatches. */
+  L.suggestCodes = function (m, text, max) { return L.suggestMatches(m, text, max).list; };
+
+  /**
    * The part card, the same data the old lookup gave: a part this person must count blind opens as that count (blind cards), otherwise
    * every DMS shelf with its counted info; `locked` = a blind recount exists, so the first count cannot be redone by staff.
    * forceFirst = a tap on a row of the first list (the old page opened that as a plain first count).
@@ -397,13 +426,27 @@ if (typeof document !== 'undefined') (function () {
   var cachedBoot = null;             // the last list this phone kept for this link (shown right after the PIN is typed)
   var verified = false, probing = false, pendingPin = null, paused = false;
   var Q = [], inflight = false, pumpTimer = null, syncTimer = null, toastTimer = null, lockTimer = null, undoMap = {};
-  var ST = { q: '', shelf: '', showDone: false, tab: 'first' };
+  var ST = { q: '', shelf: '', showDone: false, tab: 'first', expanded: true };
   var card = null, notes = [], prefill = {}, loadedAt = 0, noStore = false, offline = false, reloadWhenEmpty = false, lostList = [], offTimer = null;
   var KX = 'sc5.x';                  // the deployment id (execId) this phone has used successfully
 
   function $(id) { return document.getElementById(id); }
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+  /** a Lucide icon from the sprite in index.html (decorative); a plain <i> where SVG is not available */
+  function ic(name, cls) {
+    var NS = 'http://www.w3.org/2000/svg';
+    if (!document.createElementNS) return el('i', 'ic' + (cls ? ' ' + cls : ''));
+    var s = document.createElementNS(NS, 'svg'), u = document.createElementNS(NS, 'use');
+    s.setAttribute('class', 'ic' + (cls ? ' ' + cls : '')); s.setAttribute('aria-hidden', 'true');
+    u.setAttribute('href', '#i-' + name); s.appendChild(u); return s;
+  }
+  function btn(cls, text) { var b = el('button', cls, text); b.type = 'button'; return b; }
+  /** an outlined field with a floating label around an existing input */
+  function ofield(id, label, input) {
+    var d = el('div', 'of'), l = el('label', '', label); l.setAttribute('for', id); input.id = id;
+    d.appendChild(l); d.appendChild(input); return d;
+  }
   function fmt(n) { return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
   function today() { return (M && M.dateText) || (D && D.dateText) || ''; }
   function who() { return (M && M.counter) || (D && D.counter) || ''; }
@@ -454,10 +497,10 @@ if (typeof document !== 'undefined') (function () {
   var padBuf = '', padBusy = false;
   function buildKeys() {
     var k = $('keys');
-    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].forEach(function (d) {
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'ลบ'].forEach(function (d) {
       var b = el('button', '', d); b.type = 'button';
       if (d === '') { b.disabled = true; b.style.visibility = 'hidden'; }
-      else if (d === '⌫') { b.setAttribute('aria-label', 'ลบ'); b.addEventListener('click', function () { padBuf = padBuf.slice(0, -1); drawDots(); }); }
+      else if (d === 'ลบ') { b.className = 'del'; b.setAttribute('aria-label', 'ลบ'); b.addEventListener('click', function () { padBuf = padBuf.slice(0, -1); drawDots(); }); }
       else b.addEventListener('click', function () { padPress(d); });
       k.appendChild(b);
     });
@@ -628,20 +671,25 @@ if (typeof document !== 'undefined') (function () {
     else { b.hidden = false; b.className = 'qbadge'; b.textContent = 'กำลังส่ง ' + Q.length; }
     renderNotes();   // the "keep this page open" warning follows the queue
   }
+  /** a banner (amber) or error (red) box: icon, text, and an optional text button under it */
+  function noteBox(cls, icon, text, button) {
+    var d = el('div', cls), g = el('div', 'grow', text);
+    d.appendChild(ic(icon));
+    if (button) { g.appendChild(el('br')); g.appendChild(button); }
+    d.appendChild(g); return d;
+  }
   function renderNotes() {
     var box = $('notes'); clear(box);
     if (offline) {
-      var off = el('div', 'refused', 'ออฟไลน์ ดูรายการได้อย่างเดียว ยังบันทึกไม่ได้ จนกว่าจะเชื่อมต่อและระบบตรวจรหัสผ่าน');
-      var again = el('button', 'btn alt small', 'ลองเชื่อมต่อใหม่'); again.type = 'button'; again.addEventListener('click', retryOnline);
-      off.appendChild(el('div')); off.appendChild(again); box.appendChild(off);
+      var again = btn('tbtn', 'ลองเชื่อมต่อใหม่'); again.addEventListener('click', retryOnline);
+      box.appendChild(noteBox('banner', 'wifi-off', 'ออฟไลน์ ดูรายการได้อย่างเดียว ยังบันทึกไม่ได้ จนกว่าจะเชื่อมต่อและระบบตรวจรหัสผ่าน', again));
     }
-    if (Q.length && L.qFailing(Q)) box.appendChild(el('div', 'refused', 'ส่งไม่สำเร็จ ระบบจะลองส่งซ้ำเอง กรุณาเปิดหน้านี้ค้างไว้จนกว่าจะส่งครบ' + (noStore ? ' (เครื่องนี้เก็บคิวไม่ได้ ถ้าปิดหน้านี้รายการจะหาย)' : '')));
-    else if (Q.length && noStore) box.appendChild(el('div', 'banner', 'เครื่องนี้เก็บคิวไว้ไม่ได้ กรุณาเปิดหน้านี้ค้างไว้จนกว่า "กำลังส่ง" จะหมด'));
+    if (Q.length && L.qFailing(Q)) box.appendChild(noteBox('refused', 'triangle-alert', 'ส่งไม่สำเร็จ ระบบจะลองส่งซ้ำเอง กรุณาเปิดหน้านี้ค้างไว้จนกว่าจะส่งครบ' + (noStore ? ' (เครื่องนี้เก็บคิวไม่ได้ ถ้าปิดหน้านี้รายการจะหาย)' : '')));
+    else if (Q.length && noStore) box.appendChild(noteBox('banner', 'info', 'เครื่องนี้เก็บคิวไว้ไม่ได้ กรุณาเปิดหน้านี้ค้างไว้จนกว่า "กำลังส่ง" จะหมด'));
     notes.forEach(function (n) {
-      var d = el('div', n.kind === 'err' ? 'refused' : 'banner', n.text);
-      var x = el('button', 'btn alt small', 'ปิด'); x.type = 'button';
+      var x = btn('tbtn', 'ปิด');
       x.addEventListener('click', function () { notes = notes.filter(function (y) { return y !== n; }); renderNotes(); });
-      d.appendChild(el('div')); d.appendChild(x); box.appendChild(d);
+      box.appendChild(noteBox(n.kind === 'err' ? 'refused' : 'banner', n.kind === 'err' ? 'triangle-alert' : 'info', n.text, x));
     });
   }
 
@@ -660,19 +708,24 @@ if (typeof document !== 'undefined') (function () {
     $('prog').hidden = false;
     if (M.state !== 'open') { var b = $('blocked'); b.textContent = M.message || 'ยังนับไม่ได้'; b.hidden = false; $('tools').hidden = true; return; }
     $('blocked').hidden = true; $('tools').hidden = false;
-    if (!card) { renderChips(); renderList(); }
+    if (!card) { renderChips(); renderList(); renderSug(); }   // the suggestion rows (shelf chip, นับแล้ว) follow the fresh data
   }
   function renderProg() {
     if (!M) return;
     var box = $('prog'), P = M.progress; clear(box);
-    box.appendChild(el('b', '', 'นับแล้ว ' + fmt(P.done) + ' / ' + fmt(P.total) + ' รายการ (' + P.pct + '%)'));
+    var r1 = el('div', 'r1'), left = el('div'), num = el('div', 'num', fmt(P.done) + ' / ' + fmt(P.total));
+    left.appendChild(el('div', 'plbl', 'นับแล้ว '));
+    num.appendChild(el('small', '', ' รายการ'));
+    left.appendChild(num); r1.appendChild(left); r1.appendChild(el('span', 'pct', P.pct + '%')); box.appendChild(r1);
     var bar = el('div', 'bar'), i = el('i'); i.style.width = Math.min(100, P.pct) + '%'; bar.appendChild(i); box.appendChild(bar);
     box.appendChild(el('div', 'sub', 'วันนี้ฉันนับ ' + fmt(P.mine) + ' รายการ'));
   }
   function curList() { return ST.tab === 'second' ? M.second : M.items; }
   function renderTabs() {
     $('tabFirst').setAttribute('aria-selected', ST.tab === 'first' ? 'true' : 'false');
-    var t = $('tabSecond'); t.textContent = 'ต้องนับซ้ำ (' + fmt(L.secondLeft(M)) + ')'; t.setAttribute('aria-selected', ST.tab === 'second' ? 'true' : 'false');
+    var t = $('tabSecond'), n = L.secondLeft(M), bd = $('tabSecondN');
+    bd.textContent = fmt(n); bd.className = 'badge' + (n ? '' : ' zero');
+    t.setAttribute('aria-selected', ST.tab === 'second' ? 'true' : 'false');
   }
   function renderChips() {
     var sel = $('shelfSel'), shelves = L.shelvesOf(M, curList()); clear(sel);
@@ -683,21 +736,41 @@ if (typeof document !== 'undefined') (function () {
   function renderList() {
     if (!M || M.state !== 'open') return;
     var box = $('list'); clear(box); renderTabs();
-    var src = curList();
-    if (ST.tab === 'second') {
+    var src = curList(), second = ST.tab === 'second', panel = $('listPanel'), head = $('uncHead');
+    var forced = !!(ST.q.trim() || ST.shelf), open = ST.expanded || forced;   // a search or a shelf filter always shows the results (presentation only)
+    head.hidden = second;
+    if (second) {
+      panel.className = 'panel bare'; $('vwrap').hidden = false;
       if (!src.length) { box.appendChild(el('div', 'msg ok', M.secondMessage || 'ตอนนี้ไม่มีรายการให้คุณนับซ้ำ')); return; }
-      box.appendChild(el('div', 'sub', 'ต้องนับซ้ำ: นับให้ตรงตามที่เห็นจริง (เรียงตามความสำคัญ)'));
-    } else box.appendChild(el('div', 'sub', ST.showDone ? 'ทุกรายการ (เรียงตามชั้นวาง แล้วตามรหัส)' : 'ยังไม่ได้นับ (เรียงตามชั้นวาง แล้วตามรหัส)'));
+      box.appendChild(el('div', 'caption', 'ต้องนับซ้ำ: นับให้ตรงตามที่เห็นจริง (เรียงตามความสำคัญ)'));
+    }
     var f = L.filterItems(M, src, { q: ST.q, shelf: ST.shelf, showDone: ST.showDone, max: 150 });
-    f.rows.forEach(function (it) { box.appendChild(rowOf(it)); });
-    if (f.hidden) box.appendChild(el('div', 'sub', 'ยังมีอีก ' + fmt(f.hidden) + ' รายการ - พิมพ์ค้นหาหรือเลือกชั้นวางให้แคบลง'));
-    if (!f.rows.length) box.appendChild(el('div', 'msg ok', (ST.q.trim() || ST.shelf) ? 'ไม่มีรายการที่ตรงกับตัวกรอง' : (ST.tab === 'second' ? 'ตอนนี้ไม่มีรายการให้คุณนับซ้ำ' : 'ไม่เหลือรายการที่ยังไม่ได้นับ')));
+    if (!second) {
+      $('uncLbl').textContent = ST.showDone ? 'ทุกรายการ' : 'ยังไม่ได้นับ';
+      $('uncCnt').textContent = fmt(f.rows.length + f.hidden);
+      head.setAttribute('aria-expanded', open ? 'true' : 'false'); head.disabled = forced; head.setAttribute('aria-disabled', forced ? 'true' : 'false');
+      $('vwrap').hidden = !open;
+      panel.className = 'panel';
+      if (!open) return;
+      box.appendChild(el('div', 'sub', ST.showDone ? 'ทุกรายการ (เรียงตามชั้นวาง แล้วตามรหัส)' : 'ยังไม่ได้นับ (เรียงตามชั้นวาง แล้วตามรหัส)'));
+    }
+    var grp = el('div', second ? 'group' : '');
+    f.rows.forEach(function (it) { grp.appendChild(rowOf(it)); });
+    if (f.rows.length) box.appendChild(grp);
+    if (f.hidden) box.appendChild(el('div', 'empty', 'ยังมีอีก ' + fmt(f.hidden) + ' รายการ - พิมพ์ค้นหาหรือเลือกชั้นวางให้แคบลง'));
+    if (!f.rows.length) box.appendChild(el('div', second ? 'msg ok' : 'empty', (ST.q.trim() || ST.shelf) ? 'ไม่มีรายการที่ตรงกับตัวกรอง' : (second ? 'ตอนนี้ไม่มีรายการให้คุณนับซ้ำ' : 'ไม่เหลือรายการที่ยังไม่ได้นับ')));
   }
   function rowOf(it) {
-    var part = M.parts[it.p], b = el('button', 'prow' + (it.done ? ' done' : '')); b.type = 'button';
-    b.appendChild(el('div', 'nm', part.name));
-    var meta = el('div', 'meta'); meta.appendChild(el('span', 'code', part.code2)); meta.appendChild(el('span', 'shelfchip', it.shelf)); b.appendChild(meta);
-    if (it.done) b.appendChild(el('div', 'sub', 'นับแล้ว ' + it.on + ' · ' + it.by));
+    var part = M.parts[it.p], second = ST.tab === 'second', b = btn('prow lrow' + (it.done ? ' done' : ''));
+    var two = el('div', 'two'); two.appendChild(el('div', 'l1', part.name));
+    var l2 = el('div', 'l2'); l2.appendChild(el('span', 'pn', part.code2));
+    var sh = el('span', 'shelfchip'); sh.appendChild(ic('map-pin')); sh.appendChild(el('span', '', it.shelf)); l2.appendChild(sh);
+    two.appendChild(l2);
+    if (it.done) two.appendChild(el('div', 'l3', 'นับแล้ว ' + it.on + ' · ' + it.by));
+    b.appendChild(two);
+    if (second) { var dot = el('span', 'dot'); dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', 'ต้องนับซ้ำ'); b.appendChild(dot); }
+    else if (it.done) { var ck = ic('circle-check', 'chk'); ck.setAttribute('aria-hidden', 'false'); ck.setAttribute('role', 'img'); ck.setAttribute('aria-label', 'นับแล้ว'); b.appendChild(ck); }
+    b.appendChild(ic('chevron-right', 'chev'));
     b.addEventListener('click', function () {
       if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
       openCard(ST.tab === 'second' ? L.cardOfSecondRow(M, it.p) : L.cardOf(M, it.p, true), it.shelf, false);
@@ -714,89 +787,100 @@ if (typeof document !== 'undefined') (function () {
     showCard();
   }
   function openUnknown(code) { card = { unknown: true, ucode: code, qty: '', ushelf: '', err: '' }; showCard(); }
-  function showCard() { closeScan(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); }
+  function showCard() { hideSug(); closeScan(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); }
   function backHome() { camStop(); card = null; $('card').hidden = true; $('home').hidden = false; if (M) { renderProg(); renderChips(); renderList(); } else if (D) renderDaily(); renderNotes(); }
   function shelfInfo(name) { for (var i = 0; i < card.shelves.length; i++) if (card.shelves[i].shelf === name) return card.shelves[i]; return null; }
 
   function drawCard() {
     camStop();
     var box = $('card'); clear(box);
-    var back = el('button', 'btn alt small', card.leave ? 'ยังไม่ได้บันทึก กดอีกครั้งเพื่อกลับ' : '‹ กลับ'); back.type = 'button';
+    var nav = el('div', 'nav'), back = btn('navback');
+    back.appendChild(ic('chevron-left')); back.appendChild(el('span', '', card.leave ? 'ยังไม่ได้บันทึก กดอีกครั้งเพื่อกลับ' : 'กลับ'));
     back.addEventListener('click', function () {
       if (!card.unknown && card.mode === 'scan' && card.qty > 0 && !card.leave) { card.leave = true; drawCard(); return; }
       backHome();
     });
-    box.appendChild(back); box.appendChild(el('div')).style.height = '10px';
+    nav.appendChild(back); box.appendChild(nav);
     if (card.unknown) { drawUnknown(box); return; }
 
-    var head = el('div', 'card');
-    head.appendChild(el('div', 'code', card.code2)); var nm = el('div', '', card.name); nm.style.cssText = 'font-size:22px;font-weight:700'; head.appendChild(nm);
-    if (card.shelf !== null) head.appendChild(el('span', 'shelfchip', 'ชั้น ' + card.shelf));
+    var head = el('div', 'phead'), tile = el('div', 'tile'), ht = el('div', 'grow');
+    tile.appendChild(ic('package')); head.appendChild(tile);
+    ht.appendChild(el('div', 'pcode', card.code2)); ht.appendChild(el('h2', 'pname', card.name)); head.appendChild(ht);
     box.appendChild(head);
 
-    if (card.locked && !card.second) { box.appendChild(el('div', 'msg err', 'รายการนี้อยู่ระหว่างนับซ้ำ แจ้งเจ้าของ')); return; }   // under blind recount: no Save button, the owner unlocks it
+    var grp = null;
+    if (card.shelf !== null) {
+      grp = el('div', 'group'); var srow = el('div', 'item');
+      srow.appendChild(ic('map-pin')); srow.appendChild(el('span', 'grow', 'ชั้น ' + card.shelf)); grp.appendChild(srow);
+    }
+    if (card.locked && !card.second) { if (grp) box.appendChild(grp); box.appendChild(el('div', 'msg err', 'รายการนี้อยู่ระหว่างนับซ้ำ แจ้งเจ้าของ')); return; }   // under blind recount: no Save button, the owner unlocks it
     if (card.shelf === null) { drawShelfPicker(box); return; }
 
-    var info = card.other ? null : shelfInfo(card.shelf);
-    if (info && info.done) box.appendChild(el('div', 'banner', 'นับแล้ว ' + info.doneOn + ' โดย ' + info.doneBy + ' — นับใหม่จะแทนที่ค่าเดิม'));
-    var chg = el('button', 'linkbtn', 'เปลี่ยนชั้นวาง'); chg.type = 'button';
+    var chg = btn('item act'); chg.appendChild(el('span', 'grow', 'เปลี่ยนชั้นวาง'));
     chg.addEventListener('click', function () { card.shelf = null; card.other = false; card.qty = 0; card.lock = ''; card.warn = ''; drawCard(); });
-    box.appendChild(chg);
+    grp.appendChild(chg); box.appendChild(grp);
+    var info = card.other ? null : shelfInfo(card.shelf);
+    if (info && info.done) box.appendChild(noteBox('note', 'info', 'นับแล้ว ' + info.doneOn + ' โดย ' + info.doneBy + ' — นับใหม่จะแทนที่ค่าเดิม'));
 
-    var tabs = el('div', 'tabs'); tabs.setAttribute('role', 'tablist');
+    var tabs = el('div', 'seg'); tabs.setAttribute('role', 'tablist');
     [['scan', 'สแกนทีละชิ้น'], ['type', 'พิมพ์จำนวน']].forEach(function (m) {
-      var b = el('button', '', m[1]); b.type = 'button'; b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', card.mode === m[0] ? 'true' : 'false');
+      var b = btn('segb'); b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', card.mode === m[0] ? 'true' : 'false');
+      b.appendChild(ic('check', 'segck')); b.appendChild(el('span', 'lb', m[1]));
       b.addEventListener('click', function () { card.mode = m[0]; card.warn = ''; card.err = ''; card.camMsg = ''; card.leave = false; drawCard(); });
       tabs.appendChild(b);
     });
     box.appendChild(tabs);
 
-    if (card.mode === 'scan') drawScanMode(box); else drawTypeMode(box);
+    var pn = el('div', 'card');
+    if (card.mode === 'scan') drawScanMode(pn); else drawTypeMode(pn);
+    box.appendChild(pn);
 
     var err = el('div', card.err ? 'msg err' : ''); err.id = 'cardErr'; err.textContent = card.err || ''; box.appendChild(err);
-    box.appendChild(el('div')).style.height = '8px';
-    var save = el('button', 'btn big', 'บันทึก'); save.type = 'button'; save.id = 'saveBtn';
+    var save = btn('pbtn', 'บันทึก'); save.id = 'saveBtn';
     save.addEventListener('click', function () { doSave(readQty()); }); box.appendChild(save);
-    box.appendChild(el('div')).style.height = '8px';
-    var zero = el('button', 'btn alt', 'ไม่พบเลย (0)'); zero.type = 'button';
+    var zero = btn('tbtn c', 'ไม่พบเลย (0)');
     zero.addEventListener('click', function () { doSave(0); }); box.appendChild(zero);
     if (card.mode === 'scan') startPieceCamera();
   }
 
   function drawShelfPicker(box) {
-    box.appendChild(el('h2', '', 'เลือกชั้นวาง'));
+    box.appendChild(el('div', 'caption', 'เลือกชั้นวาง'));
+    var grp = el('div', 'group');
     card.shelves.forEach(function (s) {
-      var b = el('button', 'shelfpick', s.shelf); b.type = 'button';
-      b.appendChild(el('small', '', s.done ? 'นับแล้ว ' + s.doneOn + ' โดย ' + s.doneBy : 'ยังไม่ได้นับ'));
+      var b = btn('shelfpick item'), two = el('div', 'two');
+      two.appendChild(el('div', 'l1', s.shelf)); two.appendChild(el('div', 'l2', s.done ? 'นับแล้ว ' + s.doneOn + ' โดย ' + s.doneBy : 'ยังไม่ได้นับ'));
+      b.appendChild(two); b.appendChild(ic('chevron-right'));
       b.addEventListener('click', function () { card.shelf = s.shelf; card.other = false; card.err = ''; drawCard(); });
-      box.appendChild(b);
+      grp.appendChild(b);
     });
-    var o = el('button', 'shelfpick', 'ชั้นอื่น (ไม่มีในรายการ)'); o.type = 'button'; o.appendChild(el('small', '', 'ต้องพิมพ์ชื่อชั้นวาง'));
-    var form = el('div'); form.hidden = !card.otherOpen;
-    var inp = el('input'); inp.type = 'text'; inp.maxLength = 40; inp.placeholder = 'เช่น A-05'; inp.id = 'otherShelf';
+    var o = btn('shelfpick item'), ot = el('div', 'two');
+    ot.appendChild(el('div', 'l1', 'ชั้นอื่น (ไม่มีในรายการ)')); ot.appendChild(el('div', 'l2', 'ต้องพิมพ์ชื่อชั้นวาง')); o.appendChild(ot);
+    var form = el('div', 'panel fldwrap'); form.hidden = !card.otherOpen;
+    var inp = el('input'); inp.type = 'text'; inp.maxLength = 40; inp.placeholder = 'เช่น A-05';
     o.addEventListener('click', function () { card.otherOpen = true; form.hidden = false; inp.focus(); });
-    box.appendChild(o);
-    form.appendChild(el('label', 'fl', 'ชื่อชั้นวาง')); form.appendChild(inp);
+    grp.appendChild(o); box.appendChild(grp);
+    form.appendChild(ofield('otherShelf', 'ชื่อชั้นวาง', inp));
     var msg = el('div'); msg.id = 'otherErr'; form.appendChild(msg);
-    var ok = el('button', 'btn', 'ใช้ชั้นนี้'); ok.type = 'button'; ok.style.marginTop = '10px';
+    var ok = btn('pbtn spaced', 'ใช้ชั้นนี้');
     ok.addEventListener('click', function () {
       var v = inp.value.trim();
-      if (!v) { msg.className = 'msg err'; msg.textContent = 'กรุณาพิมพ์ชื่อชั้นวาง'; return; }
+      if (!v) { msg.className = 'msg err spaced'; msg.textContent = 'กรุณาพิมพ์ชื่อชั้นวาง'; return; }
       card.shelf = v; card.other = true; card.err = ''; drawCard();
     });
     form.appendChild(ok); box.appendChild(form);
   }
 
   function drawTypeMode(box) {
-    box.appendChild(el('label', 'fl', 'จำนวนชิ้นที่นับได้ (เป็นชิ้น ไม่ใช่ถุง/แพ็ค)'));
-    var row = el('div', 'qtyrow');
-    var minus = el('button', 'step', '−'); minus.type = 'button'; minus.setAttribute('aria-label', 'ลด');
-    var inp = el('input'); inp.type = 'number'; inp.inputMode = 'numeric'; inp.min = '0'; inp.step = '1'; inp.id = 'qtyIn'; inp.value = card.qty ? String(card.qty) : '';
-    var plus = el('button', 'step', '+'); plus.type = 'button'; plus.setAttribute('aria-label', 'เพิ่ม');
+    var lab = el('label', 'lbl', 'จำนวนชิ้นที่นับได้ (เป็นชิ้น ไม่ใช่ถุง/แพ็ค)'); lab.setAttribute('for', 'qtyIn'); box.appendChild(lab);
+    var row = el('div', 'stepper');
+    var minus = btn('step'); minus.appendChild(ic('minus')); minus.setAttribute('aria-label', 'ลด');
+    var inp = el('input'); inp.type = 'number'; inp.inputMode = 'numeric'; inp.min = '0'; inp.step = '1'; inp.id = 'qtyIn'; inp.placeholder = '0'; inp.value = card.qty ? String(card.qty) : '';
+    var plus = btn('step'); plus.appendChild(ic('plus')); plus.setAttribute('aria-label', 'เพิ่ม');
     minus.addEventListener('click', function () { inp.value = String(Math.max(0, (parseInt(inp.value, 10) || 0) - 1)); card.qty = +inp.value; });
     plus.addEventListener('click', function () { inp.value = String((parseInt(inp.value, 10) || 0) + 1); card.qty = +inp.value; });
     inp.addEventListener('input', function () { card.qty = Math.max(0, parseInt(inp.value, 10) || 0); });
-    row.appendChild(minus); row.appendChild(inp); row.appendChild(plus); box.appendChild(row);
+    var ow = el('div', 'of'); ow.appendChild(inp);
+    row.appendChild(minus); row.appendChild(ow); row.appendChild(plus); box.appendChild(row);
   }
   function readQty() {
     if (card.mode === 'type') { var v = $('qtyIn').value; return v === '' ? null : v; }
@@ -804,24 +888,24 @@ if (typeof document !== 'undefined') (function () {
   }
 
   function drawScanMode(box) {
+    box.appendChild(el('div', 'lbl', 'ชิ้นที่นับได้ (สแกนบาร์โค้ดทีละชิ้น)'));
     var big = el('div', 'bigq', String(card.qty)); big.id = 'bigqty'; big.setAttribute('aria-live', 'polite'); box.appendChild(big);
-    box.appendChild(el('div', 'sub', 'ชิ้นที่นับได้ (สแกนบาร์โค้ดทีละชิ้น)')).style.textAlign = 'center';
     var warn = el('div', card.warn ? 'msg err' : ''); warn.id = 'pieceWarn'; warn.textContent = card.warn; box.appendChild(warn);
-    var vf = el('div', 'vf'); vf.id = 'pieceVf'; var video = el('video'); video.id = 'pieceVideo'; video.setAttribute('playsinline', ''); video.setAttribute('autoplay', ''); video.muted = true; vf.appendChild(video); vf.appendChild(el('div', 'frame'));
-    var torch = el('button', 'torch', 'ไฟฉาย'); torch.type = 'button'; torch.id = 'pieceTorch'; torch.hidden = true; vf.appendChild(torch);
-    var zoom = el('button', 'zoom', '2×'); zoom.type = 'button'; zoom.id = 'pieceZoom'; zoom.hidden = true; vf.appendChild(zoom);
+    var vf = el('div', 'vf'); vf.id = 'pieceVf'; var video = el('video'); video.id = 'pieceVideo'; video.setAttribute('playsinline', ''); video.setAttribute('autoplay', ''); video.muted = true; vf.appendChild(video); vf.appendChild(el('div', 'frame')); vf.appendChild(el('div', 'line'));
+    var torch = btn('torch'); torch.id = 'pieceTorch'; torch.setAttribute('aria-label', 'ไฟฉาย'); torch.appendChild(ic('flashlight')); torch.hidden = true; vf.appendChild(torch);
+    var zoom = btn('zoom', '2×'); zoom.id = 'pieceZoom'; zoom.hidden = true; vf.appendChild(zoom);
     vf.hidden = !!card.camMsg; box.appendChild(vf);
     var ph = el('div', 'msg err', L.HINT_1D); ph.id = 'pieceHint'; ph.hidden = true; box.appendChild(ph);
     var cm = el('div', card.camMsg ? 'msg err' : ''); cm.id = 'camMsg'; cm.textContent = card.camMsg; box.appendChild(cm);
     if (card.camMsg) {
-      var lab = el('label', 'btn alt', ''); lab.appendChild(el('span', '', 'ถ่ายรูปบาร์โค้ด นับ 1 ชิ้น'));
+      var lab = el('label', 'fbtn tint wide', ''); lab.style.marginTop = '10px'; lab.appendChild(ic('camera')); lab.appendChild(el('span', '', 'ถ่ายรูปบาร์โค้ด นับ 1 ชิ้น'));
       var f = el('input'); f.type = 'file'; f.accept = 'image/*'; f.setAttribute('capture', 'environment'); f.style.cssText = 'position:absolute;left:-9999px';
       f.addEventListener('change', function () { var file = f.files && f.files[0]; f.value = ''; if (file) decodePhoto(file, function (text, why) { if (text && !L.isPlausibleCode(text)) pieceWarn(NOT_A_PART); else if (text) onPiece(text); else pieceWarn(why || 'อ่านบาร์โค้ดจากรูปไม่ได้'); }); });
       lab.appendChild(f); box.appendChild(lab);
     }
-    var g = el('div', 'gap2');
-    var m = el('button', 'btn alt small', '−1'); m.type = 'button'; m.addEventListener('click', function () { card.qty = Math.max(0, card.qty - 1); card.warn = ''; setBig(); });
-    var r = el('button', 'btn alt small', 'ล้าง'); r.type = 'button'; r.addEventListener('click', function () { card.qty = 0; card.lock = ''; card.warn = ''; setBig(); });
+    var g = el('div', 'rowbtns');
+    var m = btn('fbtn'); m.appendChild(ic('minus')); m.appendChild(document.createTextNode('1')); m.setAttribute('aria-label', 'ลดหนึ่งชิ้น'); m.addEventListener('click', function () { card.qty = Math.max(0, card.qty - 1); card.warn = ''; setBig(); });
+    var r = btn('fbtn', 'ล้าง'); r.addEventListener('click', function () { card.qty = 0; card.lock = ''; card.warn = ''; setBig(); });
     g.appendChild(m); g.appendChild(r); box.appendChild(g);
   }
   function setBig() { var b = $('bigqty'); if (b) b.textContent = String(card.qty); var w = $('pieceWarn'); if (w) { w.textContent = card.warn; w.className = card.warn ? 'msg err' : ''; } }
@@ -846,15 +930,15 @@ if (typeof document !== 'undefined') (function () {
   }
 
   function drawUnknown(box) {
-    box.appendChild(el('h2', '', 'ไม่พบรหัสนี้'));
+    box.appendChild(el('h2', 'pname', 'ไม่พบรหัสนี้'));
     var m = el('div', 'msg err'); m.id = 'unknownMsg'; m.appendChild(document.createTextNode('อ่านได้: ')); m.appendChild(el('span', 'code', card.ucode)); m.appendChild(document.createTextNode(' — ไม่มีในรายการอะไหล่')); box.appendChild(m);
-    var c = el('div', 'card'); c.appendChild(el('div', 'sub', 'บันทึกเป็นรหัสไม่รู้จัก เพื่อให้เจ้าของตรวจสอบ'));
-    c.appendChild(el('label', 'fl', 'จำนวนที่นับได้'));
-    var q = el('input'); q.type = 'number'; q.inputMode = 'numeric'; q.min = '0'; q.id = 'uqty'; q.value = card.qty; c.appendChild(q);
-    c.appendChild(el('label', 'fl', 'ชื่อชั้นวาง'));
-    var s = el('input'); s.type = 'text'; s.maxLength = 40; s.id = 'ushelf'; s.placeholder = 'เช่น A-05'; s.value = card.ushelf; c.appendChild(s);
-    var e = el('div', card.err ? 'msg err' : ''); e.textContent = card.err; c.appendChild(e);
-    var b = el('button', 'btn', 'บันทึกเป็นรหัสไม่รู้จัก'); b.type = 'button'; b.id = 'unknownSave'; b.style.marginTop = '12px';
+    box.appendChild(el('div', 'caption', 'บันทึกเป็นรหัสไม่รู้จัก เพื่อให้เจ้าของตรวจสอบ'));
+    var c = el('div', 'panel fldstack');
+    var q = el('input'); q.type = 'number'; q.inputMode = 'numeric'; q.min = '0'; q.placeholder = '0'; q.value = card.qty; c.appendChild(ofield('uqty', 'จำนวนที่นับได้', q));
+    var s = el('input'); s.type = 'text'; s.maxLength = 40; s.placeholder = 'เช่น A-05'; s.value = card.ushelf; c.appendChild(ofield('ushelf', 'ชื่อชั้นวาง', s));
+    box.appendChild(c);
+    if (card.err) { var e = el('div', 'msg err', card.err); e.setAttribute('role', 'alert'); box.appendChild(e); }
+    var b = btn('pbtn', 'บันทึกเป็นรหัสไม่รู้จัก'); b.id = 'unknownSave';
     b.addEventListener('click', function () {
       card.qty = q.value; card.ushelf = s.value.trim();
       if (card.qty === '' || !card.ushelf || isNaN(Number(card.qty)) || Number(card.qty) < 0) { card.err = 'กรุณาใส่จำนวนและชื่อชั้นวาง'; drawCard(); return; }
@@ -863,7 +947,7 @@ if (typeof document !== 'undefined') (function () {
       enqueue('fc', L.unknownBody(code, shelf, qty), 'รหัสไม่รู้จัก ' + code);
       toast('บันทึกแล้ว'); backHome();
     });
-    c.appendChild(b); box.appendChild(c);
+    box.appendChild(b);
   }
 
   /** Save = optimistic: the item leaves the list at once, the card closes, the request goes through the queue. */
@@ -901,7 +985,59 @@ if (typeof document !== 'undefined') (function () {
     if (p >= 0) { var c = L.cardOf(M, p, false); openCard(c, undefined, !!viaScan); }
     else openUnknown(String(code).trim());
   }
-  function goCode() { var v = $('codeIn').value; if (!v.trim()) return; $('codeIn').value = ''; lookup(v, false); }
+  /* ---- suggestions under the typed-code field (all DOM built with textContent) ---- */
+  var sugHint = false;
+  /** hide the list and the hint and clear the typed text (a card is opening, or a pick was made) */
+  function hideSug() { sugHint = false; $('codeIn').value = ''; clear($('codeSug')); clear($('codeSugLive')); $('codeIn').setAttribute('aria-expanded', 'false'); }
+  /** a tapped suggestion: the card of THAT part (by index, not by re-reading its code), the same card lookup() builds */
+  function openPart(p) {
+    if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }   // refused: the typed text and the list stay
+    hideSug(); homeMsg('', '');
+    openCard(L.cardOf(M, p, false), undefined, false);
+  }
+  /** the "not in the list" row / search with no exact match and no suggestions: the same unknown-code screen lookup() ends in */
+  function openUnknownTyped(text) {
+    if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
+    hideSug(); homeMsg('', '');
+    openUnknown(text);
+  }
+  function renderSug() {
+    var box = $('codeSug'), live = $('codeSugLive'), inp = $('codeIn'), text = inp.value; clear(box); clear(live);
+    if (!M || L.normScan(text).length < 2) { sugHint = false; inp.setAttribute('aria-expanded', 'false'); return; }
+    var r = L.suggestMatches(M, text, 8), typed = text.trim(), exact = L.findPart(M, text) >= 0;   // an exact code: just the matches (search opens it), no "unknown" row
+    if (exact) sugHint = false;
+    if (sugHint) box.appendChild(el('div', 'hint', 'ไม่ตรงกับรหัสใดพอดี เลือกจากรายการ หรือบันทึกเป็นรหัสไม่รู้จัก'));
+    if (!r.list.length) box.appendChild(el('div', 'caption', 'ไม่พบรหัสนี้ในรายการ — กดค้นหาเพื่อบันทึกเป็นรหัสไม่รู้จัก'));
+    var grp = el('div', 'panel group');
+    r.list.forEach(function (p, i) {
+      var part = M.parts[p], its = M.byPart[p], b = btn('srow'), two = el('div', 'two');
+      two.appendChild(el('div', 'l1', part.name));
+      var l2 = el('div', 'l2'); l2.appendChild(el('span', 'pn', r.shown[i]));
+      if (its.length) {
+        var sh = el('span', 'shelfchip'); sh.appendChild(ic('map-pin')); sh.appendChild(el('span', '', its[0].shelf + (its.length > 1 ? ' +' + (its.length - 1) : ''))); l2.appendChild(sh);
+        if (its.every(function (x) { return x.done; })) l2.appendChild(el('span', 'donetag', 'นับแล้ว'));
+      }
+      two.appendChild(l2); b.appendChild(two); b.appendChild(ic('chevron-right', 'chev'));
+      b.addEventListener('click', function () { openPart(p); });
+      grp.appendChild(b);
+    });
+    if (r.total > r.list.length) grp.appendChild(el('div', 'sugmore', 'และอีก ' + fmt(r.total - r.list.length) + ' รายการ พิมพ์เพิ่มเพื่อให้แคบลง'));
+    if (!exact) {
+    var ub = btn('srow unk'); ub.appendChild(el('span', 'grow', 'ไม่มีในรายการ — บันทึก "' + typed + '" เป็นรหัสไม่รู้จัก'));
+    ub.addEventListener('click', function () { openUnknownTyped(typed); });
+    grp.appendChild(ub);
+    }
+    box.appendChild(grp);
+    inp.setAttribute('aria-expanded', 'true');
+    live.textContent = sugHint ? 'ไม่ตรงกับรหัสใดพอดี เลือกจากรายการ' : (r.list.length ? 'พบ ' + fmt(r.total) + ' รายการ' : 'ไม่พบรหัสนี้ในรายการ');
+  }
+  /** search / Enter: an exact code opens as always; anything else NEVER opens a part by itself - with suggestions the list stays (pick one or save as unknown), without any it is an unknown code */
+  function goCode() {
+    var v = $('codeIn').value; if (!v.trim()) return;
+    if (M && L.findPart(M, v) < 0 && L.suggestMatches(M, v, 1).total > 0) { sugHint = true; renderSug(); return; }
+    if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }   // refused: keep the typed text
+    hideSug(); lookup(v, false);
+  }
 
   /* ---------------- camera (live) with photo fallback ---------------- */
   // Live mode reads 1D barcodes only (never QR), from a wide centre band of the video at full resolution. Every decode result (or "nothing") goes to
@@ -1040,7 +1176,7 @@ if (typeof document !== 'undefined') (function () {
       list.appendChild(el('div', 'big-msg', page.message || 'โหลดไม่สำเร็จ'));
       return;
     }
-    top.appendChild(el('div', 'sub', page.message));
+    if (page.message) top.appendChild(el('div', 'caption', page.message));
     var next = null;
     page.items.forEach(function (it) { var c = it.done ? dailyDone(it) : dailyCard(it); if (!it.done && !next) next = c; list.appendChild(c); });
     if (scrollNext && next && next.scrollIntoView) { scrollNext = false; next.scrollIntoView({ block: 'start' }); }
@@ -1048,8 +1184,8 @@ if (typeof document !== 'undefined') (function () {
   var scrollNext = false;
   function dailyDone(it) {
     var c = el('div', 'card done');
-    c.appendChild(el('span', 'tick', '✓'));
-    c.appendChild(el('span', '', it.shelf.split(' · ')[0] + ' · ' + it.name));
+    c.appendChild(ic('circle-check'));
+    c.appendChild(el('span', 'grow', it.shelf.split(' · ')[0] + ' · ' + it.name));
     return c;
   }
   function numInput(ph) { var i = el('input'); i.type = 'number'; i.inputMode = 'numeric'; i.min = '0'; i.step = '1'; i.placeholder = ph || ''; return i; }
@@ -1067,10 +1203,11 @@ if (typeof document !== 'undefined') (function () {
     img.src = url;
   }
   function dailyCard(it) {
-    var c = el('div', 'card'), st = { photo: null, lastModified: 0 }, pf = prefill[it.id] || {};
-    c.appendChild(el('p', 'name', it.name));
-    c.appendChild(el('div', 'code', it.code2));
-    c.appendChild(el('div', 'shelf', 'ที่เก็บตามระบบ: ' + it.shelf));
+    var c = el('div', 'card stack', ''), st = { photo: null, lastModified: 0 }, pf = prefill[it.id] || {};
+    c.appendChild(el('h2', 'pname', it.name));
+    c.appendChild(el('div', 'pcode', it.code2));
+    var sh = el('div', 'shelfchip'); sh.style.maxWidth = '100%'; sh.style.height = 'auto'; sh.style.padding = '4px 10px'; sh.style.alignSelf = 'flex-start';
+    sh.appendChild(ic('map-pin')); sh.appendChild(el('span', '', 'ที่เก็บตามระบบ: ' + it.shelf)); c.appendChild(sh);
     if (it.seen && it.seen.length) c.appendChild(el('div', 'seen', 'เคยมีคนเจอที่: ' + it.seen.join(' · ')));
     var qty, crates, per, loose, total;
     c.appendChild(el('div', 'hint', 'นับเป็นชิ้น ไม่ใช่ถุง/แพ็ค รวมทุกที่ที่เจอ'));
@@ -1078,8 +1215,8 @@ if (typeof document !== 'undefined') (function () {
       c.appendChild(el('div', 'hint', 'นับเป็นลัง×ชิ้นต่อลัง + เศษ'));
       var g = el('div', 'row3'); c.appendChild(g);
       [['ลัง', 'crates'], ['ชิ้น/ลัง', 'per'], ['เศษ', 'loose']].forEach(function (d) {
-        var box = el('div'); box.appendChild(el('label', '', d[0]));
-        var i = numInput('0'); i.className = 'qty'; box.appendChild(i); g.appendChild(box);
+        var i = numInput('0'); i.className = 'qty'; i.setAttribute('aria-label', d[0]);
+        var of = el('div', 'of'); of.appendChild(el('label', '', d[0])); of.appendChild(i); g.appendChild(of);
         if (d[1] === 'crates') crates = i; else if (d[1] === 'per') per = i; else loose = i;
       });
       if (pf.answer) { crates.value = pf.answer.crates || ''; per.value = pf.answer.perCrate || ''; loose.value = pf.answer.loose || ''; }
@@ -1087,20 +1224,22 @@ if (typeof document !== 'undefined') (function () {
       var recalc = function () { total.textContent = 'รวม ' + ((+crates.value || 0) * (+per.value || 0) + (+loose.value || 0)) + ' ชิ้น'; };
       [crates, per, loose].forEach(function (i) { i.addEventListener('input', recalc); }); recalc();
     } else {
-      c.appendChild(el('label', 'sub', 'จำนวนชิ้นที่เจอทั้งหมด ในทุกที่ (ไม่เจอเลยให้ใส่ 0)'));
-      qty = numInput('0'); qty.className = 'qty'; if (pf.answer && pf.answer.qty !== undefined) qty.value = pf.answer.qty; c.appendChild(qty);
+      var qw = el('div', 'qtyone'); qw.appendChild(el('label', 'fl', 'จำนวนชิ้นที่เจอทั้งหมด ในทุกที่ (ไม่เจอเลยให้ใส่ 0)'));
+      qty = numInput('0'); qty.className = 'qty'; if (pf.answer && pf.answer.qty !== undefined) qty.value = pf.answer.qty;
+      var qof = el('div', 'of'); qof.appendChild(qty); qw.appendChild(qof); c.appendChild(qw);
     }
     var fld = el('div', 'field'); c.appendChild(fld);
-    var pick = el('label', 'btn alt', ''); var pl = el('span', '', '📷 ถ่ายรูป'); pick.appendChild(pl); fld.appendChild(pick);
+    var pick = el('label', 'fbtn tint wide', ''); pick.appendChild(ic('camera')); var pl = el('span', '', 'ถ่ายรูป'); pick.appendChild(pl); fld.appendChild(pick);
     var file = el('input'); file.type = 'file'; file.accept = 'image/*'; file.setAttribute('capture', 'environment'); file.style.position = 'absolute'; file.style.left = '-9999px'; pick.appendChild(file);
     var prev = el('img', 'photo-prev'); prev.alt = ''; fld.appendChild(prev);
-    var foundAt = el('input'); foundAt.type = 'text'; foundAt.placeholder = 'เจอที่ไหนบ้าง (จำเป็นถ้านับได้มากกว่า 0)'; foundAt.maxLength = 80; foundAt.value = pf.foundAt || '';
-    foundAt.setAttribute('aria-label', 'เจอที่ไหนบ้าง'); foundAt.style.marginTop = '12px'; c.appendChild(foundAt);
+    var foundAt = el('input'); foundAt.type = 'text'; foundAt.maxLength = 80; foundAt.value = pf.foundAt || '';
+    foundAt.setAttribute('aria-label', 'เจอที่ไหนบ้าง');
+    var fof = el('div', 'of'); fof.appendChild(foundAt); foundAt.placeholder = 'เจอที่ไหนบ้าง (จำเป็นถ้านับได้มากกว่า 0)'; c.appendChild(fof);
     var err = el('div', 'msg err'); err.hidden = true; c.appendChild(err);
     function showErr(t) { err.textContent = t; err.hidden = !t; }
     if (pf.err) showErr(pf.err);
-    var send = el('button', 'btn', 'ส่งรายการนี้'); send.type = 'button'; send.style.marginTop = '12px'; c.appendChild(send);
-    function resetPhoto() { st.photo = null; st.lastModified = 0; prev.style.display = 'none'; pl.textContent = '📷 ถ่ายรูป'; file.value = ''; }
+    var send = btn('pbtn', 'ส่งรายการนี้'); c.appendChild(send);
+    function resetPhoto() { st.photo = null; st.lastModified = 0; prev.style.display = 'none'; pl.textContent = 'ถ่ายรูป'; file.value = ''; }
     file.addEventListener('change', function () {
       showErr('');
       var f = file.files[0];
@@ -1109,7 +1248,7 @@ if (typeof document !== 'undefined') (function () {
       shrink(f, function (data) {
         if (!data) { resetPhoto(); showErr('อ่านรูปไม่ได้ ถ่ายรูปใหม่ตอนนี้'); return; }
         st.photo = data; st.lastModified = f.lastModified;
-        prev.src = data; prev.style.display = 'block'; pl.textContent = '📷 ถ่ายใหม่';
+        prev.src = data; prev.style.display = 'block'; pl.textContent = 'ถ่ายใหม่';
       });
     });
     send.addEventListener('click', function () {
@@ -1137,7 +1276,10 @@ if (typeof document !== 'undefined') (function () {
     });
     $('tabFirst').addEventListener('click', function () { ST.tab = 'first'; ST.shelf = ''; renderChips(); renderList(); });
     $('tabSecond').addEventListener('click', function () { ST.tab = 'second'; ST.shelf = ''; renderChips(); renderList(); });
+    $('scanBackdrop').addEventListener('click', closeScan);   // same as the X button
+    $('uncHead').addEventListener('click', function () { ST.expanded = !ST.expanded; renderList(); });   // collapse / expand the uncounted list (presentation only)
     $('codeGo').addEventListener('click', goCode);
+    $('codeIn').addEventListener('input', function () { sugHint = false; renderSug(); });
     $('codeIn').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); goCode(); } });
     $('shelfSel').addEventListener('change', function () { ST.shelf = this.value; renderList(); });
     $('q').addEventListener('input', function () { ST.q = this.value; renderList(); });
@@ -1162,7 +1304,24 @@ if (typeof document !== 'undefined') (function () {
     window.addEventListener('beforeunload', function (ev) { if (Q.length) { ev.preventDefault(); ev.returnValue = ''; return ''; } });
   }
 
+  /** Fonts load after the first paint (system fonts show at once, the web fonts swap in later); a failure just keeps the system fonts. */
+  function loadFonts() {
+    try {
+      var l = document.createElement('link'); l.rel = 'stylesheet';
+      l.href = 'https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600&family=Roboto:wght@400;500&family=Roboto+Mono:wght@400&display=swap';
+      document.head.appendChild(l);
+    } catch (e) { /* system fonts: fine */ }
+  }
+  /** keep the page behind the scan sheet from scrolling while it is open */
+  function watchSheet() {
+    try {
+      if (typeof MutationObserver === 'undefined') return;
+      var sc = $('scan'), sync = function () { document.body.classList.toggle('sheet-open', !sc.hidden); };
+      new MutationObserver(sync).observe(sc, { attributes: true, attributeFilter: ['hidden'] }); sync();
+    } catch (e) { /* no scroll lock: fine */ }
+  }
   function start() {
+    loadFonts(); watchSheet();
     if (L.isLineBrowser(navigator.userAgent)) $('linebanner').hidden = false;   // LINE's in-app browser cannot use the camera
     if (!T) { $('nolink').hidden = false; return; }
     buildKeys(); wire();
