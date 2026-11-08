@@ -331,6 +331,10 @@ var StockLib = (function () {
     if (/:\/\/|www\./i.test(raw)) return false;
     return /^[A-Z0-9]{5,20}$/.test(L.normScan(raw));
   };
+  /** A typed code long enough to be a whole part code (a plausible code of 12+ normalised characters, e.g. 90793-AT479-00): if it is not in the list it is an unlisted product, not a half-typed search. */
+  L.isFullCode = function (text) {
+    return L.isPlausibleCode(text) && L.normScan(text).length >= 12;
+  };
   /** 'empty' (nothing read) | 'ignored' (something read that is not a part code: silently dropped) | 'plausible' (+ n = its normalised text) */
   L.readClass = function (text) {
     if (!str(text)) return { kind: 'empty', n: '' };
@@ -426,7 +430,7 @@ if (typeof document !== 'undefined') (function () {
   var cachedBoot = null;             // the last list this phone kept for this link (shown right after the PIN is typed)
   var verified = false, probing = false, pendingPin = null, paused = false;
   var Q = [], inflight = false, pumpTimer = null, syncTimer = null, toastTimer = null, lockTimer = null, undoMap = {};
-  var ST = { q: '', shelf: '', showDone: false, tab: 'first', expanded: true };
+  var ST = { q: '', shelf: '', showDone: false, tab: 'first', expanded: false };
   var card = null, notes = [], prefill = {}, loadedAt = 0, noStore = false, offline = false, reloadWhenEmpty = false, lostList = [], offTimer = null;
   var KX = 'sc5.x';                  // the deployment id (execId) this phone has used successfully
 
@@ -1034,6 +1038,7 @@ if (typeof document !== 'undefined') (function () {
   /** search / Enter: an exact code opens as always; anything else NEVER opens a part by itself - with suggestions the list stays (pick one or save as unknown), without any it is an unknown code */
   function goCode() {
     var v = $('codeIn').value; if (!v.trim()) return;
+    if (M && L.findPart(M, v) < 0 && L.isFullCode(v)) { openUnknownTyped(v.trim()); return; }   // a whole code that is not listed: like a scan of an unlisted product (refused while not verified: the text stays)
     if (M && L.findPart(M, v) < 0 && L.suggestMatches(M, v, 1).total > 0) { sugHint = true; renderSug(); return; }
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }   // refused: keep the typed text
     hideSug(); lookup(v, false);
