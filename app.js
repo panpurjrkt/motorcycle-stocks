@@ -90,6 +90,7 @@ var StockLib = (function () {
   /* ---- the full-count model (from the boot payload: column arrays) ---- */
   L.makeModel = function (b) {
     var m = { mode: 'fullcount', v: str(b.v), counter: str(b.counter), dateText: str(b.dateText), state: str(b.state), message: str(b.message), secondMessage: str(b.secondMessage),
+      loc: str(b.loc), locs: (b.locs || []).map(str),
       progress: copy(b.progress || { done: 0, total: 0, pct: 0, mine: 0, second: 0 }), parts: [], idIndex: Object.create(null), m2: Object.create(null), m1: Object.create(null),
       items: [], second: [], byPart: [], locked: Object.create(null), cards: Object.create(null) };
     var P = b.parts || {}, ids = P.id || [], i;
@@ -191,13 +192,22 @@ var StockLib = (function () {
   };
 
   /** The request body of a full-count save (the same fields the old page sent). */
-  L.fcBody = function (card, qty, mode) {
+  L.fcBody = function (card, qty, mode, loc) {
     var b = { id: card.id, qty: String(qty), mode: mode === 'scan' ? 'scan' : 'type' };
+    if (loc) b.loc = loc;   // a roaming person's chosen location (everybody else's is decided by the server)
     if (card.second) b.second = true;
     if (card.other) b.otherShelf = card.shelf; else b.shelf = card.shelf;
     return b;
   };
-  L.unknownBody = function (code, shelf, qty) { return { unknown: true, unknownCode: code, unknownShelf: shelf, qty: String(qty), mode: 'type' }; };
+  L.unknownBody = function (code, shelf, qty, loc) { var b = { unknown: true, unknownCode: code, unknownShelf: shelf, qty: String(qty), mode: 'type' }; if (loc) b.loc = loc; return b; };
+  /** The header text under the name: date, the mode, and the location the person counts at today ("สนง.ใหญ่", a branch). */
+  L.headerSub = function (date, fullcount, loc) { return str(date) + (fullcount ? ' · นับครั้งแรก' : '') + (str(loc) ? ' · ' + str(loc) : ''); };
+  /** The location list a roaming person may pick from, or [] when there is nothing to pick (fewer than 2). */
+  L.locChoices = function (locs, current) {
+    var out = (locs || []).map(str).filter(Boolean);
+    if (current && out.indexOf(str(current)) < 0 && out.length) out.push(str(current));
+    return out.length > 1 ? out : [];
+  };
 
   function sameShelf(a, b) {
     var x = str(a).trim().toLowerCase(), y = str(b).trim().toLowerCase();
@@ -486,7 +496,9 @@ if (typeof document !== 'undefined') (function () {
 
   /* ---------------- network ---------------- */
   var NET = { ok: false, code: 'NET', error: 'เชื่อมต่อไม่ได้ ตรวจสอบสัญญาณแล้วลองใหม่' };
+  var pickLoc = '';   // v7: the location a roaming person picked (empty = the server decides)
   function api(action, extra, cb, timeoutMs, token) {
+    if (pickLoc && (action === 'boot' || action === 'sync' || action === 'daily')) { var ex = {}; Object.keys(extra || {}).forEach(function (k) { ex[k] = extra[k]; }); ex.loc = pickLoc; extra = ex; }
     var body = L.makeRequest(token || T.t, PIN, action, extra), ctl = null, to = null, finished = false;
     function fin(res) { if (finished) return; finished = true; clearTimeout(to); cb(res); }
     try {
@@ -700,10 +712,19 @@ if (typeof document !== 'undefined') (function () {
   /* ---------------- rendering: shell ---------------- */
   function render() {
     $('who').textContent = 'สวัสดี ' + who();
-    $('sub').textContent = today() + (M ? ' · นับครั้งแรก' : '');
+    $('sub').textContent = L.headerSub(today(), !!M, (M || D || {}).loc);
+    renderLocBar();
     renderBadge(); renderNotes();
     $('fcHome').hidden = !M; $('dailyHome').hidden = !D;
     if (M) renderFc(); else if (D) renderDaily();
+  }
+
+  /** v7: a roaming person's location picker (only shown when there is more than one place to go). */
+  function renderLocBar() {
+    var bar = $('locBar'), src = M || D || {}, choices = L.locChoices(src.locs, src.loc), sel = $('locPick');
+    if (!choices.length) { bar.hidden = true; return; }
+    bar.hidden = false; clear(sel);
+    choices.forEach(function (n) { var o = el('option', '', n); o.value = n; if (n === src.loc) o.selected = true; sel.appendChild(o); });
   }
 
   /* ---------------- rendering: full count home ---------------- */
@@ -933,22 +954,24 @@ if (typeof document !== 'undefined') (function () {
     else if (d.action === 'wrong') { card.warn = 'บาร์โค้ดไม่ตรงกับชิ้นนี้ ไม่นับ'; beep(); buzz([80, 60, 80]); setBig(); }
   }
 
+  /** A count at a branch needs no shelf name: the server uses the branch itself as the place (v7). The main shop still asks for one. */
+  function needShelf() { return !(M && M.loc && M.loc !== 'สนง.ใหญ่'); }
   function drawUnknown(box) {
     box.appendChild(el('h2', 'pname', 'ไม่พบรหัสนี้'));
     var m = el('div', 'msg err'); m.id = 'unknownMsg'; m.appendChild(document.createTextNode('อ่านได้: ')); m.appendChild(el('span', 'code', card.ucode)); m.appendChild(document.createTextNode(' — ไม่มีในรายการอะไหล่')); box.appendChild(m);
     box.appendChild(el('div', 'caption', 'บันทึกเป็นรหัสไม่รู้จัก เพื่อให้เจ้าของตรวจสอบ'));
     var c = el('div', 'panel fldstack');
     var q = el('input'); q.type = 'number'; q.inputMode = 'numeric'; q.min = '0'; q.placeholder = '0'; q.value = card.qty; c.appendChild(ofield('uqty', 'จำนวนที่นับได้', q));
-    var s = el('input'); s.type = 'text'; s.maxLength = 40; s.placeholder = 'เช่น A-05'; s.value = card.ushelf; c.appendChild(ofield('ushelf', 'ชื่อชั้นวาง', s));
+    var s = el('input'); s.type = 'text'; s.maxLength = 40; s.placeholder = needShelf() ? 'เช่น A-05' : 'ไม่ต้องกรอกก็ได้'; s.value = card.ushelf; c.appendChild(ofield('ushelf', needShelf() ? 'ชื่อชั้นวาง' : 'ชื่อชั้นวาง (ถ้ามี)', s));
     box.appendChild(c);
     if (card.err) { var e = el('div', 'msg err', card.err); e.setAttribute('role', 'alert'); box.appendChild(e); }
     var b = btn('pbtn', 'บันทึกเป็นรหัสไม่รู้จัก'); b.id = 'unknownSave';
     b.addEventListener('click', function () {
       card.qty = q.value; card.ushelf = s.value.trim();
-      if (card.qty === '' || !card.ushelf || isNaN(Number(card.qty)) || Number(card.qty) < 0) { card.err = 'กรุณาใส่จำนวนและชื่อชั้นวาง'; drawCard(); return; }
+      if (card.qty === '' || (needShelf() && !card.ushelf) || isNaN(Number(card.qty)) || Number(card.qty) < 0) { card.err = needShelf() ? 'กรุณาใส่จำนวนและชื่อชั้นวาง' : 'กรุณาใส่จำนวนที่นับได้'; drawCard(); return; }
       if (!verified) { toast('ยังบันทึกไม่ได้ รอให้ระบบตรวจรหัสก่อน'); return; }
       var code = card.ucode, shelf = card.ushelf, qty = card.qty;
-      enqueue('fc', L.unknownBody(code, shelf, qty), 'รหัสไม่รู้จัก ' + code);
+      enqueue('fc', L.unknownBody(code, shelf, qty, pickLoc), 'รหัสไม่รู้จัก ' + code);
       toast('บันทึกแล้ว'); backHome();
     });
     box.appendChild(b);
@@ -958,7 +981,7 @@ if (typeof document !== 'undefined') (function () {
   function doSave(q) {
     if (!verified) { toast('ยังบันทึกไม่ได้ รอให้ระบบตรวจรหัสก่อน'); return; }
     if (q === null || q === '' || isNaN(Number(q)) || Number(q) < 0) { card.err = 'กรุณาใส่จำนวนที่นับได้ (ไม่พบเลยให้กด "ไม่พบเลย")'; drawCard(); return; }
-    var body = L.fcBody(card, q, card.mode);
+    var body = L.fcBody(card, q, card.mode, pickLoc);
     enqueue('fc', body, card.name + ' ชั้น ' + card.shelf);
     toast('บันทึกแล้ว');
     backHome();
@@ -1176,7 +1199,7 @@ if (typeof document !== 'undefined') (function () {
   /* ---------------- daily random count (same app, same queue) ---------------- */
   function renderDaily() {
     var page = D, top = $('dTop'), list = $('dList'); clear(top); clear(list);
-    $('sub').textContent = page.dateText + (page.total ? ' · นับแล้ว ' + page.done + '/' + page.total : '');
+    $('sub').textContent = L.headerSub(page.dateText, false, page.loc) + (page.total ? ' · นับแล้ว ' + page.done + '/' + page.total : '');
     if (page.state !== 'open') {
       list.appendChild(el('div', 'big-msg', page.message || 'โหลดไม่สำเร็จ'));
       return;
@@ -1267,6 +1290,11 @@ if (typeof document !== 'undefined') (function () {
 
   /* ---------------- events ---------------- */
   function wire() {
+    $('locPick').addEventListener('change', function () {   // v7: a roaming person goes to another location: a fresh list from the server for it
+      pickLoc = this.value; ST.tab = 'first'; ST.shelf = '';
+      if (card) backHome();
+      reboot();
+    });
     $('scanBtn').addEventListener('click', openScan);
     $('scanClose').addEventListener('click', closeScan);
     $('scanFile').addEventListener('change', function () {

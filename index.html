@@ -58,6 +58,9 @@ h1, h2 { margin:0; }
 .hdr { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:4px 8px; padding-top:2px; }
 .hdr > div:first-child { flex:1 1 auto; min-width:0; }
 .hdr h1 { font-size:22px; font-weight:600; line-height:1.3; }
+.locbar { display:flex; align-items:center; gap:8px; }
+.locbar label { font-size:14px; color:var(--mute); }
+.locbar select { flex:1 1 auto; min-height:44px; padding:6px 12px; border-radius:12px; border:1px solid var(--outline); background:var(--surface); color:inherit; font:inherit; }
 .hdr-r { display:flex; align-items:center; gap:6px; flex:none; margin-left:auto; max-width:100%; }
 .ibtn { width:44px; height:44px; border:0; border-radius:50%; background:transparent; color:var(--mute); display:grid; place-items:center; cursor:pointer; transition:background .1s; flex:none; }
 .ibtn:active { background:var(--tonal); color:var(--on-tonal); }
@@ -337,6 +340,7 @@ body.sheet-open { overflow:hidden; }
         <button class="ibtn" id="refresh" type="button" aria-label="รีเฟรช"><svg class="ic" aria-hidden="true"><use href="#i-refresh-cw"/></svg></button>
       </div>
     </header>
+    <div id="locBar" class="locbar" hidden><label for="locPick">ไปนับที่</label><select id="locPick"></select></div>
     <div id="notes" class="stack"></div>
     <div id="home">
       <div id="fcHome" class="stack" hidden>
