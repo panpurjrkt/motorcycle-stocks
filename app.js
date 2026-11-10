@@ -92,7 +92,7 @@ var StockLib = (function () {
     var m = { mode: 'fullcount', v: str(b.v), counter: str(b.counter), dateText: str(b.dateText), state: str(b.state), message: str(b.message), secondMessage: str(b.secondMessage),
       loc: str(b.loc), locs: (b.locs || []).map(str),
       progress: copy(b.progress || { done: 0, total: 0, pct: 0, mine: 0, second: 0 }), parts: [], idIndex: Object.create(null), m2: Object.create(null), m1: Object.create(null),
-      items: [], second: [], byPart: [], locked: Object.create(null), cards: Object.create(null) };
+      items: [], second: [], byPart: [], locked: Object.create(null), cards: Object.create(null), e2: Object.create(null), e1: Object.create(null), nOwn: 0 };
     var P = b.parts || {}, ids = P.id || [], i;
     for (i = 0; i < ids.length; i++) {
       var part = { id: ids[i], code2: str(P.code2[i]), name: str(P.name[i]), c1: str(P.c1[i]), codes: [] }, n2 = L.normScan(part.code2), n1 = L.normScan(part.c1);
@@ -102,6 +102,16 @@ var StockLib = (function () {
       if (n2 && !(n2 in m.m2)) m.m2[n2] = i;
       if (n1 && !(n1 in m.m1)) m.m1[n1] = i;
     }
+    m.nOwn = m.parts.length;
+    // shop parts that are not on this location's list ([code2, code1, name]; "done" shows only from this phone's own saves): found by code like any part, counted here on an extra shelf (the save goes the unknown-code way)
+    (b.ext || []).forEach(function (x) {
+      var e = { id: '', code2: str(x[0]), name: str(x[2]), c1: str(x[1]), codes: [], ext: true, doneOn: '', doneBy: '' }, a2 = L.normScan(e.code2), a1 = L.normScan(e.c1), i2 = m.parts.length;
+      if (!a2) return;
+      e.codes.push(a2); if (a1 && a1 !== a2) e.codes.push(a1);
+      m.parts.push(e); m.byPart.push([]);
+      if (!(a2 in m.e2)) m.e2[a2] = i2;
+      if (a1 && !(a1 in m.e1)) m.e1[a1] = i2;
+    });
     function cols(c, into, perPart) {
       c = c || {};
       var p = c.p || [];
@@ -120,6 +130,8 @@ var StockLib = (function () {
     if (!n) return -1;
     if (n in m.m2) return m.m2[n];
     if (n in m.m1) return m.m1[n];
+    if (n in m.e2) return m.e2[n];   // a shop part from another location: only after the whole own list (the server looks at the own list first)
+    if (n in m.e1) return m.e1[n];
     return -1;
   };
 
@@ -159,6 +171,7 @@ var StockLib = (function () {
    */
   L.cardOf = function (m, p, forceFirst) {
     var part = m.parts[p], base = { p: p, id: part.id, code2: part.code2, name: part.name, codes: part.codes.slice() };
+    if (part.ext) { base.ext = true; base.second = false; base.locked = false; base.shelves = []; base.extDone = part.doneOn ? { doneOn: part.doneOn, doneBy: part.doneBy } : null; return base; }
     if (!forceFirst && m.cards[p]) { base.second = true; base.locked = false; base.shelves = m.cards[p].map(function (s) { return copy(s); }); return base; }
     base.second = false; base.locked = !!m.locked[p];
     base.shelves = m.byPart[p].map(function (it) { return { shelf: it.shelf, done: it.done, doneOn: it.on, doneBy: it.by }; });
@@ -199,7 +212,7 @@ var StockLib = (function () {
     if (card.other) b.otherShelf = card.shelf; else b.shelf = card.shelf;
     return b;
   };
-  L.unknownBody = function (code, shelf, qty, loc) { var b = { unknown: true, unknownCode: code, unknownShelf: shelf, qty: String(qty), mode: 'type' }; if (loc) b.loc = loc; return b; };
+  L.unknownBody = function (code, shelf, qty, loc, mode) { var b = { unknown: true, unknownCode: code, unknownShelf: shelf, qty: String(qty), mode: mode === 'scan' ? 'scan' : 'type' }; if (loc) b.loc = loc; return b; };
   /** The header text under the name: date, the mode, and the location the person counts at today ("สนง.ใหญ่", a branch). */
   L.headerSub = function (date, fullcount, loc) { return str(date) + (fullcount ? ' · นับครั้งแรก' : '') + (str(loc) ? ' · ' + str(loc) : ''); };
   /** The location list a roaming person may pick from, or [] when there is nothing to pick (fewer than 2). */
@@ -220,7 +233,14 @@ var StockLib = (function () {
    * Returns an undo record (or null when there is nothing to change). who = this counter, today = the Thai date text.
    */
   L.applySave = function (m, body, who, today) {
-    if (!m || !body || body.unknown) return null;
+    if (!m || !body) return null;
+    if (body.unknown) {   // a count of a shop part from another location (the card of such a part): it shows as counted on the card; a truly unknown code changes nothing
+      var xp = L.findPart(m, body.unknownCode);
+      if (xp < 0 || !m.parts[xp].ext) return null;
+      var xu = { ext: m.parts[xp], on: m.parts[xp].doneOn, by: m.parts[xp].doneBy };
+      m.parts[xp].doneOn = today; m.parts[xp].doneBy = who;
+      return xu;
+    }
     var p = m.idIndex[L.normId(body.id)];
     if (p === undefined) return null;
     var want = body.otherShelf !== undefined && str(body.otherShelf).trim() ? body.otherShelf : body.shelf, list = body.second ? m.second : m.byPart[p], hit = null;
@@ -241,6 +261,7 @@ var StockLib = (function () {
   };
   L.revertSave = function (m, undo) {
     if (!m || !undo) return;
+    if (undo.ext) { undo.ext.doneOn = undo.on; undo.ext.doneBy = undo.by; return; }
     if (undo.item) { undo.item.done = undo.done; undo.item.on = undo.on; undo.item.by = undo.by; }
     if (undo.card) { undo.card.s.done = undo.card.done; undo.card.s.doneOn = undo.card.on; undo.card.s.doneBy = undo.card.by; }
     m.progress = copy(undo.progress);
@@ -395,7 +416,6 @@ var StockLib = (function () {
 
   /* ---- the daily count page ---- */
   var PHOTO_MAX_AGE = 10 * 60 * 1000;
-  L.PHOTO_MAX_AGE = PHOTO_MAX_AGE;
   L.photoTooOld = function (lastModified, now) { return !lastModified || (now - lastModified) > PHOTO_MAX_AGE; };
   /** Checks one daily card before it is queued (the same messages as the old page). d: {crates, per, loose, foundAt, photo, lastModified, now} (qty only for a plain entry) */
   L.dailyCheck = function (d) {
@@ -841,6 +861,7 @@ if (typeof document !== 'undefined') (function () {
     card = c;
     card.shelf = shelf === undefined ? null : shelf; card.other = false;
     if (card.shelf === null && card.shelves.length === 1) card.shelf = card.shelves[0].shelf;
+    if (card.ext) { card.otherOpen = needShelf(); if (!needShelf()) { card.shelf = ''; card.other = true; } }   // a part from another location: a branch needs no shelf (the branch itself), the main shop asks for a name
     card.mode = 'type'; card.qty = 0; card.lock = ''; card.warn = ''; card.err = ''; card.camMsg = ''; card.leave = false; card.unknown = false;
     showCard(); focusQty();
   }
@@ -869,17 +890,20 @@ if (typeof document !== 'undefined') (function () {
     box.appendChild(head);
 
     var grp = null;
-    if (card.shelf !== null) {
+    if (card.ext) box.appendChild(noteBox('note', 'info', 'อะไหล่จากสาขาอื่น/สำนักงานใหญ่ นับที่นี่ได้ตามปกติ'));
+    if (card.shelf !== null && card.shelf !== '') {
       grp = el('div', 'group'); var srow = el('div', 'item');
       srow.appendChild(ic('map-pin')); srow.appendChild(el('span', 'grow', 'ชั้น ' + card.shelf)); grp.appendChild(srow);
     }
     if (card.locked && !card.second) { if (grp) box.appendChild(grp); box.appendChild(el('div', 'msg err', 'รายการนี้อยู่ระหว่างนับซ้ำ แจ้งเจ้าของ')); return; }   // under blind recount: no Save button, the owner unlocks it
     if (card.shelf === null) { drawShelfPicker(box); return; }
 
-    var chg = btn('item act'); chg.appendChild(el('span', 'grow', 'เปลี่ยนชั้นวาง'));
-    chg.addEventListener('click', function () { card.shelf = null; card.other = false; card.qty = 0; card.lock = ''; card.warn = ''; drawCard(); });
-    grp.appendChild(chg); box.appendChild(grp);
-    var info = card.other ? null : shelfInfo(card.shelf);
+    if (!(card.ext && !needShelf())) {
+      var chg = btn('item act'); chg.appendChild(el('span', 'grow', 'เปลี่ยนชั้นวาง'));
+      chg.addEventListener('click', function () { card.shelf = null; card.other = false; card.qty = 0; card.lock = ''; card.warn = ''; drawCard(); });
+      grp.appendChild(chg); box.appendChild(grp);
+    }
+    var info = card.ext ? (card.extDone ? { done: true, doneOn: card.extDone.doneOn, doneBy: card.extDone.doneBy } : null) : (card.other ? null : shelfInfo(card.shelf));
     if (info && info.done) box.appendChild(noteBox('note', 'info', 'นับแล้ว ' + info.doneOn + ' โดย ' + info.doneBy + ' — นับใหม่จะแทนที่ค่าเดิม'));
 
     var tabs = el('div', 'seg'); tabs.setAttribute('role', 'tablist');
@@ -1016,14 +1040,13 @@ if (typeof document !== 'undefined') (function () {
   function doSave(q) {
     if (!verified) { toast('ยังบันทึกไม่ได้ รอให้ระบบตรวจรหัสก่อน'); return; }
     if (q === null || q === '' || isNaN(Number(q)) || Number(q) < 0) { card.err = 'กรุณาใส่จำนวนที่นับได้ (ไม่พบเลยให้กด "ไม่พบเลย")'; drawCard(); return; }
-    var body = L.fcBody(card, q, card.mode, pickLoc);
-    enqueue('fc', body, card.name + ' ชั้น ' + card.shelf);
+    var body = card.ext ? L.unknownBody(card.code2 || card.codes[0], card.shelf, q, pickLoc, card.mode) : L.fcBody(card, q, card.mode, pickLoc);   // a part from another location is saved exactly like an unknown code (the server stores the same row)
+    enqueue('fc', body, card.name + (card.shelf ? ' ชั้น ' + card.shelf : ''));
     toast('บันทึกแล้ว');
     backHome();
   }
 
   /* ---------------- scan overlay, typed code (local lookup: no server call) ---------------- */
-  function homeNote(t) { var m = $('homeMsg'); clear(m); m.appendChild(el('div', 'banner', t)); }
   function homeMsg(t, kind) { var m = $('homeMsg'); clear(m); if (t) m.appendChild(el('div', 'msg ' + kind, t)); }
   function openScan() {
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
@@ -1078,7 +1101,7 @@ if (typeof document !== 'undefined') (function () {
       if (its.length) {
         var sh = el('span', 'shelfchip'); sh.appendChild(ic('map-pin')); sh.appendChild(el('span', '', its[0].shelf + (its.length > 1 ? ' +' + (its.length - 1) : ''))); l2.appendChild(sh);
         if (its.every(function (x) { return x.done; })) l2.appendChild(el('span', 'donetag', 'นับแล้ว'));
-      }
+      } else if (part.ext && part.doneOn) l2.appendChild(el('span', 'donetag', 'นับแล้ว'));
       two.appendChild(l2); b.appendChild(two); b.appendChild(ic('chevron-right', 'chev'));
       b.addEventListener('click', function () { openPart(p); });
       grp.appendChild(b);
