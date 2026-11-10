@@ -841,9 +841,11 @@ if (typeof document !== 'undefined') (function () {
     card = c;
     card.shelf = shelf === undefined ? null : shelf; card.other = false;
     if (card.shelf === null && card.shelves.length === 1) card.shelf = card.shelves[0].shelf;
-    card.mode = viaScan ? 'scan' : 'type'; card.qty = 0; card.lock = ''; card.warn = ''; card.err = ''; card.camMsg = ''; card.leave = false; card.unknown = false;
-    showCard();
+    card.mode = 'type'; card.qty = 0; card.lock = ''; card.warn = ''; card.err = ''; card.camMsg = ''; card.leave = false; card.unknown = false;
+    showCard(); focusQty();
   }
+  /** the card opens in type mode: put the cursor in the quantity box (iOS may refuse to open the keyboard - harmless) */
+  function focusQty() { try { var q = $('qtyIn'); if (q && card && card.mode === 'type') q.focus(); } catch (e) { /* ignore */ } }
   function openUnknown(code) { card = { unknown: true, ucode: code, qty: '', ushelf: '', err: '' }; showCard(); }
   function showCard() { hideSug(); closeScan(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); }
   function backHome() { camStop(); card = null; $('card').hidden = true; $('home').hidden = false; if (M) { renderProg(); renderChips(); renderList(); } else if (D) renderDaily(); renderNotes(); }
@@ -881,7 +883,7 @@ if (typeof document !== 'undefined') (function () {
     if (info && info.done) box.appendChild(noteBox('note', 'info', 'นับแล้ว ' + info.doneOn + ' โดย ' + info.doneBy + ' — นับใหม่จะแทนที่ค่าเดิม'));
 
     var tabs = el('div', 'seg'); tabs.setAttribute('role', 'tablist');
-    [['scan', 'สแกนทีละชิ้น'], ['type', 'พิมพ์จำนวน']].forEach(function (m) {
+    [['type', 'พิมพ์จำนวน'], ['scan', 'สแกนทีละชิ้น']].forEach(function (m) {
       var b = btn('segb'); b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', card.mode === m[0] ? 'true' : 'false');
       b.appendChild(ic('check', 'segck')); b.appendChild(el('span', 'lb', m[1]));
       b.addEventListener('click', function () { card.mode = m[0]; card.warn = ''; card.err = ''; card.camMsg = ''; card.leave = false; drawCard(); });
