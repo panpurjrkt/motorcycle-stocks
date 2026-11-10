@@ -54,12 +54,12 @@ var StockLib = (function () {
     if (!r || typeof r !== 'object' || Array.isArray(r)) return { ok: false, code: 'FAULT', error: 'ได้รับคำตอบที่อ่านไม่ได้ กรุณาลองใหม่' };
     return r;
   };
-  /** 'ok' | 'pin' (ask for the PIN again, keep the queue) | 'retry' (try again later) | 'mode' (the server switched mode) | 'refused' (a real no) */
+  /** 'ok' | 'pin' (ask for the PIN again - or to set it first when code is SETPIN - keep the queue) | 'retry' (try again later) | 'mode' (the server switched mode) | 'refused' (a real no) */
   L.classify = function (res) {
     if (!res || typeof res !== 'object') return 'retry';
     if (res.ok === true) return 'ok';
     switch (res.code) {
-      case 'PIN': case 'LOCK': return 'pin';
+      case 'PIN': case 'LOCK': case 'SETPIN': return 'pin';   // SETPIN = a valid link whose PIN is not set yet: the pad opens in "choose your code" mode
       case 'BUSY': case 'FAULT': case 'NET': return 'retry';
       case 'ALREADY': return 'ok';          // already saved (by an earlier try): the same as success
       case 'MODE': case 'ENDED': return 'mode';
@@ -524,8 +524,12 @@ if (typeof document !== 'undefined') (function () {
   function drawDots() { var d = $('dots').children; for (var i = 0; i < d.length; i++) d[i].className = i < padBuf.length ? 'on' : ''; }
   function lockKeys(on) { var b = $('keys').querySelectorAll('button'); for (var i = 0; i < b.length; i++) if (b[i].textContent !== '') b[i].disabled = on; }
   /** Shows the pad (wrong PIN / lock / first open). The queue and the lists stay in memory: nothing is lost. */
-  function showPad(msg, locked) {
+  var setMode = '', firstPin = '';   // setMode: '' = ordinary PIN pad, 'enter' = choose a code, 'confirm' = type it again (the first one stays in memory only, like the PIN)
+  var SET_TXT = { '': 'ใส่รหัส PIN 4 หลัก', enter: 'ตั้งรหัส 4 หลัก', confirm: 'ยืนยันรหัสอีกครั้ง' };
+  function drawSetMode() { $('padSub').textContent = SET_TXT[setMode]; $('padBack').hidden = setMode !== 'confirm'; }
+  function showPad(msg, locked, set) {
     camStop(); PIN = null; padBuf = ''; padBusy = false; verified = false; drawDots();
+    setMode = set ? 'enter' : ''; firstPin = ''; drawSetMode();
     $('app').hidden = true; $('scan').hidden = true; $('pad').hidden = false;
     $('padMsg').textContent = msg || ''; lockKeys(!!locked);
     clearTimeout(syncTimer); clearTimeout(lockTimer);
@@ -534,11 +538,36 @@ if (typeof document !== 'undefined') (function () {
   function padPress(d) {
     if (padBusy || padBuf.length >= 4) return;
     padBuf += d; drawDots();
+    if (padBuf.length === 4 && setMode) { setPress(padBuf); return; }
     if (padBuf.length === 4) {
       var typed = padBuf;
       if (probing) { pendingPin = typed; $('padMsg').textContent = 'กำลังตรวจรหัส…'; padBusy = true; return; }   // the "does this link need a PIN" probe is still out
       submitPin(typed);
     }
+  }
+  /** Four digits typed while choosing a code: remember them, ask again; if the two differ start over; if they match save them and go straight in. */
+  function setPress(typed) {
+    if (setMode === 'enter') {
+      firstPin = typed; setMode = 'confirm'; padBuf = ''; drawDots(); drawSetMode(); $('padMsg').textContent = ''; return;
+    }
+    if (typed !== firstPin) {
+      firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); $('padMsg').textContent = 'รหัสไม่ตรงกัน ลองใหม่'; return;
+    }
+    padBusy = true; PIN = typed; $('padMsg').textContent = 'กำลังบันทึกรหัส…';
+    api('setpin', {}, function (res) {
+      if (res && res.ok === true) { setMode = ''; firstPin = ''; drawSetMode(); padBuf = ''; drawDots(); submitPin(typed); return; }   // saved: boot as logged in with it
+      if (res && (res.code === 'BAD' || res.code === 'SETPIN')) { PIN = null; firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); padBusy = false; $('padMsg').textContent = res.error || 'บันทึกรหัสไม่สำเร็จ ลองใหม่'; return; }   // a plain no: choose again
+      // the reply was lost (network / timeout / busy) or says PIN needed (the save may have landed, or another phone set one): try to go in with the code just typed first
+      setMode = ''; firstPin = ''; drawSetMode(); $('padMsg').textContent = 'กำลังตรวจรหัส…';
+      api('boot', {}, function (r) {
+        var c = L.classify(r);
+        if (c === 'ok') { padBusy = false; padBuf = ''; drawDots(); acceptBoot(r, false); return; }
+        if (c === 'pin' && r.code === 'LOCK') { showPad(r.error, true); return; }
+        if (c === 'pin' && r.code === 'SETPIN') { showPad('บันทึกรหัสไม่สำเร็จ ลองใหม่', false, true); return; }   // nothing was saved: choose again
+        if (c === 'pin') { showPad('รหัสถูกตั้งไว้แล้ว ใส่รหัสที่ตั้งไว้', false); return; }   // someone set another code: the ordinary pad
+        showPad(r.error || NET.error, false, true);   // still no signal: back to choosing (the server decides again on the next try)
+      });
+    });
   }
   function submitPin(typed) {
     padBusy = true; PIN = typed; $('padMsg').textContent = 'กำลังตรวจรหัส…';
@@ -555,6 +584,7 @@ if (typeof document !== 'undefined') (function () {
     if (c === 'ok') { PIN = PIN === null || PIN === undefined ? null : PIN; acceptBoot(res, false); return; }
     if (c === 'pin') {
       var locked = res.code === 'LOCK';
+      if (res.code === 'SETPIN') { pendingPin = null; showPad('', false, true); return; }   // choose a code first (nothing was typed wrong)
       if (!fromPad && !locked && !pendingPin) { return; }   // the probe: stay on the pad, nothing to say
       showPad(res.error || (fromPad ? 'รหัสไม่ถูกต้อง' : ''), locked); return;
     }
@@ -572,7 +602,7 @@ if (typeof document !== 'undefined') (function () {
   function retryOnline() {
     clearTimeout(offTimer);
     if (!offline || PIN === null) return;
-    api('boot', {}, function (res) { var c = L.classify(res); if (c === 'ok') acceptBoot(res, false); else if (c === 'pin') showPad(res.error, res.code === 'LOCK'); else offTimer = setTimeout(retryOnline, 15000); });
+    api('boot', {}, function (res) { var c = L.classify(res); if (c === 'ok') acceptBoot(res, false); else if (c === 'pin') showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN'); else offTimer = setTimeout(retryOnline, 15000); });
   }
   function probe() {
     probing = true;
@@ -581,6 +611,7 @@ if (typeof document !== 'undefined') (function () {
       var c = L.classify(res);
       if (c === 'ok') { pendingPin = null; padBusy = false; acceptBoot(res, false); return; }   // a link with no PIN
       if (res && res.code === 'LOCK') { showPad(res.error, true); return; }
+      if (res && res.code === 'SETPIN') { pendingPin = null; padBusy = false; showPad('', false, true); return; }   // a valid link with no PIN yet: choose one first
       if (pendingPin) { var p = pendingPin; pendingPin = null; submitPin(p); }
     }, 25000);
   }
@@ -608,7 +639,7 @@ if (typeof document !== 'undefined') (function () {
     if (e.kind === 'fc' && M) { var u = L.applySave(M, e.body, M.counter, M.dateText); if (u) undoMap[e.rid] = u; }
     if (e.kind === 'daily' && D && D.items) D.items.forEach(function (it) { if (it.id === e.body.id && !it.done) { it.done = true; D.done = (D.done || 0) + 1; undoMap[e.rid] = { daily: it }; } });
   }
-  function reboot() { api('boot', {}, function (res) { var c = L.classify(res); if (c === 'ok') acceptBoot(res, false); else if (c === 'pin') showPad(res.error, res.code === 'LOCK'); }); }
+  function reboot() { api('boot', {}, function (res) { var c = L.classify(res); if (c === 'ok') acceptBoot(res, false); else if (c === 'pin') showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN'); }); }
 
   function schedSync() {
     clearTimeout(syncTimer);
@@ -620,7 +651,7 @@ if (typeof document !== 'undefined') (function () {
     api('sync', { v: M ? M.v : '' }, function (res) {
       var c = L.classify(res);
       if (c === 'ok') { if (res.same) { loadedAt = Date.now(); if (manual) toast('รายการเป็นปัจจุบันแล้ว'); } else if (!card) acceptBoot(res, false); }
-      else if (c === 'pin') { showPad(res.error, res.code === 'LOCK'); return; }
+      else if (c === 'pin') { showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN'); return; }
       else if (manual) toast(res.error || NET.error);
       schedSync();
     });
@@ -660,7 +691,9 @@ if (typeof document !== 'undefined') (function () {
     } else if (c === 'retry') {
       L.qRetry(Q, e.rid, Date.now()); persistQ();
     } else if (c === 'pin') {
-      paused = true; showPad(res.error || '', res.code === 'LOCK'); renderBadge(); return;   // the queue stays; after the PIN it goes on
+      paused = true;
+      if (!(res.code === 'SETPIN' && setMode && !$('pad').hidden)) showPad(res.error || '', res.code === 'LOCK', res.code === 'SETPIN');   // (a pad already in set mode keeps the digits being typed)
+      renderBadge(); return;   // the queue stays; after the PIN it goes on
     } else {   // refused (or the mode changed): the item comes back with the reason
       L.qDrop(Q, e.rid); persistQ(); giveBack(e, res.error || 'บันทึกไม่สำเร็จ');
       if (c === 'mode') reboot();
@@ -1354,6 +1387,7 @@ if (typeof document !== 'undefined') (function () {
     if (L.isLineBrowser(navigator.userAgent)) $('linebanner').hidden = false;   // LINE's in-app browser cannot use the camera
     if (!T) { $('nolink').hidden = false; return; }
     buildKeys(); wire();
+    $('padBack').addEventListener('click', function () { if (setMode !== 'confirm') return; firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); $('padMsg').textContent = ''; });
     var all = L.qParse(store.get(KQ), T.t);
     lostList = all.filter(function (e) { return e.lostPhoto; });
     Q = all.filter(function (e) { return !e.lostPhoto; });

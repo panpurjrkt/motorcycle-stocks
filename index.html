@@ -326,10 +326,11 @@ body.sheet-open { overflow:hidden; }
   <div id="pad" class="pad" hidden>
     <div class="tile"><svg class="ic" aria-hidden="true"><use href="#i-scan-barcode"/></svg></div>
     <h1 id="padTitle">นับสต็อก</h1>
-    <div class="sub">ใส่รหัส PIN 4 หลัก</div>
+    <div class="sub" id="padSub">ใส่รหัส PIN 4 หลัก</div>
     <div class="dots" id="dots" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
     <div class="padmsg" id="padMsg" role="alert"></div>
     <div class="keys" id="keys"></div>
+    <button type="button" class="tbtn" id="padBack" hidden style="margin-top:14px">ตั้งรหัสใหม่</button>
   </div>
 
   <div id="app" class="stack" hidden>
