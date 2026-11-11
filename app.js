@@ -38,6 +38,14 @@ var StockLib = (function () {
     if (!/^[A-Za-z0-9_-]{3,200}$/.test(out.x || '') || !/^[A-Za-z0-9_-]{1,100}$/.test(out.t || '')) return null;
     return { x: out.x, t: out.t };
   };
+  /** The link to use: a valid hash always wins; else the saved one (JSON string {x,t} from localStorage, re-validated); else null. Never holds a PIN. */
+  L.resolveLink = function (hash, saved) {
+    var h = L.parseHash(hash);
+    if (h) return h;
+    var o = null;
+    try { o = saved ? JSON.parse(saved) : null; } catch (e) { return null; }
+    return o && typeof o === 'object' ? L.parseHash('#x=' + encodeURIComponent(str(o.x)) + '&t=' + encodeURIComponent(str(o.t))) : null;
+  };
   L.execUrl = function (x) { return 'https://script.google.com/macros/s/' + x + '/exec'; };
 
   /* ---- requests ---- */
@@ -450,9 +458,15 @@ if (typeof document !== 'undefined') (function () {
   var ZXING_SRI = 'sha384-BzBxP10ZE72aitqj5UMmUsbKFliP/DZqA8Wq+BNNhlIJDGoEd1tpkMYXOg9+n6sB';
   var SYNC_MS = 90000, WAIT_POLL_MS = 25000;
 
-  var T = L.parseHash(location.hash);
-  var EXEC = T ? L.execUrl(T.x) : '';
   var store = L.makeStore(function () { return window.localStorage; });
+  var KLINK = 'sc5.link';            // the staff link {x,t} kept so a home-screen launch (no #hash) still works; never the PIN
+  var linkFromStore = !L.parseHash(location.hash);   // true when the link came from the saved copy, not from the address
+  var T = L.resolveLink(location.hash, store.get(KLINK));
+  if (T) {
+    store.set(KLINK, JSON.stringify({ x: T.x, t: T.t }));
+    if (!L.parseHash(location.hash)) { try { history.replaceState(null, '', location.href.split('#')[0] + '#x=' + T.x + '&t=' + T.t); } catch (e) { /* fine */ } }   // replaceState fires no hashchange
+  }
+  var EXEC = T ? L.execUrl(T.x) : '';
   var KQ = T ? L.storeKey('q', T.t) : '', KL = T ? L.storeKey('l', T.t) : '';
 
   var PIN = null;                    // memory only, never stored. null = none typed (a probe / a person with no PIN)
@@ -550,7 +564,9 @@ if (typeof document !== 'undefined') (function () {
   function showPad(msg, locked, set) {
     camStop(); PIN = null; padBuf = ''; padBusy = false; verified = false; drawDots();
     setMode = set ? 'enter' : ''; firstPin = ''; drawSetMode();
-    $('app').hidden = true; $('scan').hidden = true; $('pad').hidden = false;
+    if (locked && linkFromStore) store.del(KLINK);   // a saved link that ends in LOCK is stale or revoked: forget it, the next open shows the no-link message
+    $('app').hidden = true; $('pad').hidden = false;
+    if (!$('scan').hidden) closeScan();   // closeScan also syncs the back-history entry; any open card is kept as it was
     $('padMsg').textContent = msg || ''; lockKeys(!!locked);
     clearTimeout(syncTimer); clearTimeout(lockTimer);
     if (locked) lockTimer = setTimeout(function () { lockKeys(false); $('padMsg').textContent = ''; }, 15 * 60 * 1000 + 3000);
@@ -868,8 +884,28 @@ if (typeof document !== 'undefined') (function () {
   /** the card opens in type mode: put the cursor in the quantity box (iOS may refuse to open the keyboard - harmless) */
   function focusQty() { try { var q = $('qtyIn'); if (q && card && card.mode === 'type') q.focus(); } catch (e) { /* ignore */ } }
   function openUnknown(code) { card = { unknown: true, ucode: code, qty: '', ushelf: '', err: '' }; showCard(); }
-  function showCard() { hideSug(); closeScan(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); }
-  function backHome() { camStop(); card = null; $('card').hidden = true; $('home').hidden = false; if (M) { renderProg(); renderChips(); renderList(); } else if (D) renderDaily(); renderNotes(); }
+  function showCard() { hideSug(); closeScan(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); syncLayer(); }
+  function backHome() { camStop(); card = null; $('card').hidden = true; $('home').hidden = false; if (M) { renderProg(); renderChips(); renderList(); } else if (D) renderDaily(); renderNotes(); syncLayer(); }
+  /* Android back button / back gesture: while the card or the scan sheet is open, one history entry (same URL, state object only) sits on top, so "back" closes that layer
+     instead of leaving the app. Closing a layer by hand removes the entry again; the swallow flag ignores the popstate that this causes. */
+  var layerPushed = false, layerSwallow = false;
+  function layerOpen() { return !!card || !$('scan').hidden; }
+  function syncLayer() {
+    try {
+      if (layerOpen() && !layerPushed) { history.pushState({ layer: 1 }, ''); layerPushed = true; }
+      else if (!layerOpen() && layerPushed) { layerPushed = false; layerSwallow = true; history.back(); }
+    } catch (e) { layerPushed = false; layerSwallow = false; }
+  }
+  function onLayerPop() {
+    if (layerSwallow) { layerSwallow = false; return; }
+    if (!layerPushed) return;
+    layerPushed = false;
+    if (card) {
+      if (!card.unknown && card.mode === 'scan' && card.qty > 0 && !card.leave) { card.leave = true; drawCard(); syncLayer(); return; }   // same "press again" guard as the card's own back button
+      backHome(); return;
+    }
+    if (!$('scan').hidden) closeScan();
+  }
   function shelfInfo(name) { for (var i = 0; i < card.shelves.length; i++) if (card.shelves[i].shelf === name) return card.shelves[i]; return null; }
 
   function drawCard() {
@@ -1051,18 +1087,18 @@ if (typeof document !== 'undefined') (function () {
   function openScan() {
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
     homeMsg('', '');
-    $('scan').hidden = false; $('scanNote').textContent = 'เล็งบาร์โค้ดให้อยู่ในกรอบ'; $('scanHint').hidden = true;
+    $('scan').hidden = false; syncLayer(); $('scanNote').textContent = 'เล็งบาร์โค้ดให้อยู่ในกรอบ'; $('scanHint').hidden = true;
     var hint = L.makeIgnoreHint(), confirm = L.makeConfirm();
     camStart($('scanVideo'), function (text) {
       var k = L.readClass(text), now = Date.now();
       $('scanHint').hidden = !hint.feed(k.kind, now);
       if (k.kind !== 'plausible') return;                                   // empty or implausible (a QR link, junk): ignored silently, keep scanning
       var p = L.findPart(M, text);
-      if (p >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(text, true); return; }
-      if (confirm.add(k.n)) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(text, true); }   // a plausible code that is not in the list: only after the same code was read twice in a row
+      if (p >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(text, true); syncLayer(); return; }
+      if (confirm.add(k.n)) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(text, true); syncLayer(); }   // a plausible code that is not in the list: only after the same code was read twice in a row
     }, function (msg) { $('scanNote').textContent = msg; }, { torch: $('scanTorch'), zoom: $('scanZoom'), frame: $('scanVf') });
   }
-  function closeScan() { camStop(); $('scan').hidden = true; }
+  function closeScan() { camStop(); $('scan').hidden = true; syncLayer(); }
   function lookup(code, viaScan) {
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
     homeMsg('', '');
@@ -1367,7 +1403,7 @@ if (typeof document !== 'undefined') (function () {
     $('uncHead').addEventListener('click', function () { ST.expanded = !ST.expanded; renderList(); });   // collapse / expand the uncounted list (presentation only)
     $('codeGo').addEventListener('click', goCode);
     $('codeIn').addEventListener('input', function () { sugHint = false; renderSug(); });
-    $('codeIn').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); goCode(); } });
+    $('codeIn').addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); goCode(); } });
     $('shelfSel').addEventListener('change', function () { ST.shelf = this.value; renderList(); });
     $('q').addEventListener('input', function () { ST.q = this.value; renderList(); });
     $('showDone').addEventListener('change', function () { ST.showDone = this.checked; renderList(); });
@@ -1381,6 +1417,7 @@ if (typeof document !== 'undefined') (function () {
       pump();
     });
     window.addEventListener('pagehide', camStop);
+    window.addEventListener('popstate', onLayerPop);
     // another link opened in this tab (a shared phone): ALWAYS start over with it. If the waiting saves exist only in memory (no storage), nothing may be lost:
     // the app is hidden ("รอส่งข้อมูลให้เสร็จก่อน") until they are sent, then the page reloads.
     window.addEventListener('hashchange', function () {
@@ -1410,7 +1447,7 @@ if (typeof document !== 'undefined') (function () {
   function start() {
     loadFonts(); watchSheet();
     if (L.isLineBrowser(navigator.userAgent)) $('linebanner').hidden = false;   // LINE's in-app browser cannot use the camera
-    if (!T) { $('nolink').hidden = false; return; }
+    if (!T) { $('nolink').textContent = 'เปิดแอปจากลิงก์ที่ได้รับครั้งแรก 1 ครั้ง แล้วจึงเพิ่มไปที่หน้าจอโฮม'; $('nolink').hidden = false; return; }
     buildKeys(); wire();
     $('padBack').addEventListener('click', function () { if (setMode !== 'confirm') return; firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); $('padMsg').textContent = ''; });
     var all = L.qParse(store.get(KQ), T.t);
