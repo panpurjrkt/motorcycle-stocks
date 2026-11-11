@@ -353,6 +353,28 @@ var StockLib = (function () {
     var sw = Math.max(1, Math.round(vw * 0.9)), sh = Math.max(1, Math.round(vh * 0.35));
     return { sx: Math.round((vw - sw) / 2), sy: Math.round((vh - sh) / 2), sw: sw, sh: sh };
   };
+  /** Which engine the live scan starts with: 'native' only when getSupportedFormats() lists code_128 or code_39 (many Android builds expose a BarcodeDetector that supports nothing), else 'zxing'. */
+  L.pickEngine = function (supported) {
+    var ok = Array.isArray(supported) && supported.some(function (f) { return f === 'code_128' || f === 'code_39'; });
+    return ok ? 'native' : 'zxing';
+  };
+  /** Android camera pick: devices = enumerateDevices() entries. Returns the deviceId of the main back camera (lowest camera2 index, no ultra/wide/tele/depth/macro lens) or '' (keep facingMode: iOS, unknown labels). */
+  L.pickBackCamera = function (devices) {
+    var BAD = /ultra|wide|tele|depth|macro/i, best = null;
+    (devices || []).forEach(function (d) {
+      if (!d || d.kind !== 'videoinput' || !d.deviceId) return;
+      var lab = String(d.label || ''), m = /camera2?\s*(\d+)/i.exec(lab);
+      if (!/camera2/i.test(lab) || !m || !/facing back/i.test(lab)) return;
+      var c = { id: d.deviceId, idx: parseInt(m[1], 10), bad: BAD.test(lab) ? 1 : 0 };
+      if (!best || c.bad < best.bad || (c.bad === best.bad && c.idx < best.idx)) best = c;
+    });
+    return best ? best.id : '';
+  };
+  /** A saved engine note ('zx:<ms>') is valid for 7 days; anything else (old 'zx', junk, expired) is ignored. */
+  L.engineSavedValid = function (v, now) {
+    var m = /^zx:(\d+)$/.exec(String(v || '')); if (!m) return false;
+    var age = now - parseInt(m[1], 10); return age >= 0 && age < 7 * 86400000;
+  };
   /** A native BarcodeDetector answer ([{rawValue, format}]) -> the first 1D read ('' when there is only a QR or nothing) */
   L.pickLive = function (results) {
     var r = (results || []).filter(function (x) { return x && x.rawValue && L.ONE_D_NATIVE.indexOf(x.format) >= 0; })[0];
@@ -1096,7 +1118,7 @@ if (typeof document !== 'undefined') (function () {
       var p = L.findPart(M, text);
       if (p >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(text, true); syncLayer(); return; }
       if (confirm.add(k.n)) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(text, true); syncLayer(); }   // a plausible code that is not in the list: only after the same code was read twice in a row
-    }, function (msg) { $('scanNote').textContent = msg; }, { torch: $('scanTorch'), zoom: $('scanZoom'), frame: $('scanVf') });
+    }, function (msg) { $('scanNote').textContent = msg; }, { torch: $('scanTorch'), zoom: $('scanZoom'), frame: $('scanVf'), onIdle: function () { $('scanNote').textContent = 'ถือห่างประมาณ 15-25 ซม. ให้บาร์โค้ดอยู่ในกรอบ หรือกดถ่ายรูปแทน'; } });
   }
   function closeScan() { camStop(); $('scan').hidden = true; syncLayer(); }
   function lookup(code, viaScan) {
@@ -1222,44 +1244,119 @@ if (typeof document !== 'undefined') (function () {
       }
     } catch (e) { /* no extras: fine */ }
   }
-  /** onFrame(text) gets every decode result ('' = nothing). opts: {torch, zoom, frame (the viewfinder element: its shape follows the decoded band)} */
+  function engineSaved() { try { return L.engineSavedValid(localStorage.getItem('sc5.engine'), Date.now()) ? 'zx' : ''; } catch (e) { return ''; } }
+  function engineSave() { try { localStorage.setItem('sc5.engine', 'zx:' + Date.now()); } catch (e) { /* ignore */ } }
+  var camThrows = 0, camDeviceId = '';   // consecutive native detect() failures; the camera chosen earlier in this page session
+  var camEngineSession = '';   // 'zxing' once the native detector proved useless in this page session
+  var CAM_VIDEO = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+  /** After permission: on Android multi-lens phones swap facingMode for the main back camera (labels are only readable after permission). Always resolves with a usable stream. */
+  function betterStream(stream, run) {
+    return new Promise(function (resolve) {
+      try {
+        var md = navigator.mediaDevices, tr = stream.getVideoTracks()[0], cur = '';
+        try { cur = (tr && tr.getSettings && tr.getSettings().deviceId) || ''; } catch (e) { /* ignore */ }
+        var reopen = function (id) {
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          md.getUserMedia({ video: { deviceId: { exact: id }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).then(function (s2) { camDeviceId = id; resolve(s2); }, function () {
+            camDeviceId = '';
+            md.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).then(resolve, function () { resolve(null); });
+          });
+        };
+        if (camDeviceId) { if (camDeviceId === cur) resolve(stream); else reopen(camDeviceId); return; }   // chosen earlier in this session: no new enumeration
+        if (!md.enumerateDevices) { resolve(stream); return; }
+        md.enumerateDevices().then(function (devs) {
+          var id = L.pickBackCamera(devs);
+          if (run !== camRun) { resolve(stream); return; }
+          if (id && id === cur) camDeviceId = id;
+          if (!id || id === cur) { resolve(stream); return; }
+          reopen(id);
+        }, function () { resolve(stream); });
+      } catch (e) { resolve(stream); }
+    });
+  }
+  /** Builds decode(canvas, cb): native BarcodeDetector when it really supports 1D formats, ZXing otherwise; falls over to ZXing when native throws or reads nothing for ~4 s. */
+  function makeEngine(run, onReady, onNoLib) {
+    var st = { det: null, nativeOk: false, nativeBad: false, zx: false, started: Date.now(), hints: null, frames: 0, zxHits: 0 };
+    var needZX = function (cb) {
+      loadZXing(function (ok) {
+        if (run !== camRun) return;
+        if (!ok) { if (!st.det || st.nativeBad) onNoLib(); cb && cb(false); return; }
+        st.hints = st.hints || L.zxHints(window.ZXing, false); st.zx = true; cb && cb(true);
+      });
+    };
+    var zxRead = function (canvas) { return st.zx ? L.zxDecodeSource(window.ZXing, new window.ZXing.HTMLCanvasElementLuminanceSource(canvas), st.hints) : ''; };
+    var decode = function (canvas, cb) {
+      if (st.nativeBad || !st.det) { cb(zxRead(canvas)); return; }
+      var after = function (t) {
+        if (t) { st.nativeOk = true; cb(t); return; }
+        if (!st.nativeOk && Date.now() - st.started > 4000) {   // native silent for 4 s: probe ZXing on every 3rd frame
+          if (!st.zx) needZX();
+          if (++st.frames % 3 === 0) {
+            var z = zxRead(canvas);
+            if (z) { if (++st.zxHits >= 2) { camEngineSession = 'zxing'; st.nativeBad = true; } cb(z); return; }
+          }
+        }
+        cb('');
+      };
+      var broke = function () { st.nativeBad = true; camEngineSession = 'zxing'; if (++camThrows >= 3) engineSave(); needZX(); cb(''); };
+      try { st.det.detect(canvas).then(function (r) { camThrows = 0; after(L.pickLive(r)); }, broke); } catch (e) { broke(); }
+    };
+    var go = function (useNative) {
+      if (useNative) { st.det = makeDetector(L.ONE_D_NATIVE); }
+      if (st.det) { onReady(decode); return; }
+      needZX(function (ok) { if (ok) onReady(decode); });
+    };
+    if (engineSaved() === 'zx' || camEngineSession === 'zxing' || !('BarcodeDetector' in window)) { go(false); return; }
+    var sf = window.BarcodeDetector.getSupportedFormats;
+    if (typeof sf !== 'function') { go(true); return; }
+    var settled = false, fin = function (formats) { if (settled) return; settled = true; go(L.pickEngine(formats) === 'native'); };
+    try { sf.call(window.BarcodeDetector).then(fin, function () { fin([]); }); } catch (e) { fin([]); }
+    setTimeout(function () { fin([]); }, 1500);
+  }
+  /** onFrame(text) gets every decode result ('' = nothing). opts: {torch, zoom, frame (the viewfinder element: its shape follows the decoded band), onIdle (called once when nothing was read for ~8 s)} */
   function camStart(video, onFrame, onFail, opts) {
     opts = opts || {};
     camStop();
-    var run = camRun;
+    var run = camRun, idleDone = false, idleAt = Date.now() + 8000;
     cam.gate = L.makeGate(700);
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nocam');
-      navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false }).then(function (stream) {
-        if (run !== camRun) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
-        cam.stream = stream; video.srcObject = stream; setupTrack(stream, opts.torch, opts.zoom);
-        var p = video.play(); if (p && p.catch) p.catch(function () { /* autoplay refused: the stream still decodes */ });
-        var det = makeDetector(L.ONE_D_NATIVE);
-        if (det) { bandLoop(run, video, opts.frame, onFrame, function (canvas, cb) { try { det.detect(canvas).then(function (r) { cb(L.pickLive(r)); }, function () { cb(''); }); } catch (e) { cb(''); } }); return; }
-        loadZXing(function (ok) {
-          if (run !== camRun) return;
-          if (!ok) { camStop(); onFail(camMessage(new Error('nolib'))); return; }
-          var hints = L.zxHints(window.ZXing, false);
-          bandLoop(run, video, opts.frame, onFrame, function (canvas, cb) { cb(L.zxDecodeSource(window.ZXing, new window.ZXing.HTMLCanvasElementLuminanceSource(canvas), hints)); });
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).then(function (first) {
+        if (run !== camRun) { first.getTracks().forEach(function (t) { t.stop(); }); return; }
+        return betterStream(first, run).then(function (stream) {
+          if (run !== camRun) { if (stream) stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+          if (!stream) { camStop(); onFail(camMessage(new Error('nocam'))); return; }
+          cam.stream = stream;
+          video.setAttribute('playsinline', ''); video.setAttribute('autoplay', ''); video.muted = true;
+          video.srcObject = stream; setupTrack(stream, opts.torch, opts.zoom);
+          var p; try { p = video.play(); } catch (e0) { p = null; } if (p && p.catch) p.catch(function () { /* autoplay refused: the stream still decodes */ });
+          var wrapped = function (text) {
+            if (text) idleDone = true;
+            else if (!idleDone && opts.onIdle && Date.now() > idleAt) { idleDone = true; try { opts.onIdle(); } catch (e2) { /* ignore */ } }
+            onFrame(text);
+          };
+          makeEngine(run, function (decode) { if (run === camRun) bandLoop(run, video, opts.frame, wrapped, decode, idleAt, function () { if (!idleDone) { idleDone = true; if (opts.onIdle) opts.onIdle(); } }); }, function () { if (run === camRun) { camStop(); onFail(camMessage(new Error('nolib'))); } });
         });
       }).catch(function (e) { if (run === camRun) { camStop(); onFail(camMessage(e)); } });
     } catch (e) { camStop(); onFail(camMessage(e)); }
   }
   /** The decode loop: copy the centre band of the video (full resolution) to a canvas, decode it, hand the result on, wait ~100 ms, repeat. */
-  function bandLoop(run, video, frameEl, onFrame, decode) {
+  function bandLoop(run, video, frameEl, onFrame, decode, idleAt, onIdle) {
     var canvas = document.createElement('canvas'), ctx = null, shaped = false;
     (function tick() {
       if (run !== camRun) return;
       var again = function () { if (run === camRun) cam.timer = setTimeout(tick, 100); };
       var vw = video.videoWidth, vh = video.videoHeight;
-      if (!vw || !vh) { again(); return; }
+      if (!vw || !vh) { if (onIdle && Date.now() > idleAt) { var oi = onIdle; onIdle = null; try { oi(); } catch (e3) { /* ignore */ } } again(); return; }
       try {
         var r = L.bandRect(vw, vh);
         if (!ctx) { try { ctx = canvas.getContext('2d', { willReadFrequently: true }); } catch (e0) { ctx = canvas.getContext('2d'); } }
         if (canvas.width !== r.sw || canvas.height !== r.sh) { canvas.width = r.sw; canvas.height = r.sh; }
         if (!shaped && frameEl && frameEl.style) { shaped = true; frameEl.style.aspectRatio = r.sw + ' / ' + r.sh; }   // the viewfinder shows (about) the band that is decoded
         ctx.drawImage(video, r.sx, r.sy, r.sw, r.sh, 0, 0, r.sw, r.sh);
-        decode(canvas, function (text) { if (run === camRun) { try { onFrame(text); } catch (e1) { /* ignore */ } } again(); });
+        var fin = false, finish = function (text) { if (fin) return; fin = true; if (run === camRun) { try { onFrame(text); } catch (e1) { /* ignore */ } } again(); };
+        setTimeout(function () { finish(''); }, 2000);   // a decoder that never answers must not stall the loop
+        decode(canvas, finish);
       } catch (e) { again(); }
     })();
   }
