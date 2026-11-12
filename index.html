@@ -2,7 +2,7 @@
 <html lang="th">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex,nofollow">
 <meta name="theme-color" content="#F7F9FC" media="(prefers-color-scheme: light)">
@@ -16,7 +16,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="นับสต็อก">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdn.jsdelivr.net; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src * blob: data: mediastream:; connect-src https://script.google.com https://script.googleusercontent.com; base-uri 'none'; form-action 'none'; manifest-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdn.jsdelivr.net; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src * blob: data: mediastream:; connect-src https://script.google.com https://script.googleusercontent.com; base-uri 'none'; form-action 'none'; manifest-src 'self'; worker-src 'self'">
 <title>นับสต็อก</title>
 <style>
 :root { color-scheme:light dark;
@@ -51,6 +51,7 @@ html { -webkit-text-size-adjust:100%; background:var(--bg); }
 body { margin:0; background:var(--bg); color:var(--ink); font:400 16px/1.5 var(--sans); font-variant-numeric:tabular-nums; overflow-wrap:anywhere; -webkit-font-smoothing:antialiased;
   padding:max(12px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
 button, input, select { font-family:inherit; color:inherit; }
+input, select, textarea { font-size:16px; }   /* 16 px or more: iOS zooms the page on focus below that (class rules below may go larger) */
 button { -webkit-tap-highlight-color:transparent; }
 :focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
 h1, h2 { margin:0; }
@@ -71,7 +72,15 @@ h1, h2 { margin:0; }
 .locbar select { flex:1 1 auto; min-height:44px; padding:6px 12px; border-radius:12px; border:1px solid var(--outline); background:var(--surface); color:inherit; font:inherit; }
 .hdr-r { display:flex; align-items:center; gap:6px; flex:none; margin-left:auto; max-width:100%; }
 .ibtn { width:44px; height:44px; border:0; border-radius:50%; background:transparent; color:var(--mute); display:grid; place-items:center; cursor:pointer; transition:background .1s; flex:none; }
-.ibtn:active { background:var(--tonal); color:var(--on-tonal); }
+.ibtn:active { background:var(--tonal); color:var(--on-tonal); transform:scale(.92); filter:brightness(.8); }
+.ibtn.spin .ic { animation:ibspin .8s linear infinite; }
+@keyframes ibspin { to { transform:rotate(360deg); } }
+.busy { display:flex; align-items:center; justify-content:center; gap:10px; padding:10px 0; font-size:15px; font-weight:500; }
+.spinner { width:22px; height:22px; flex:none; border-radius:50%; border:3px solid var(--outline); border-top-color:var(--primary); animation:ibspin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration:2.4s; } }
+@media (prefers-reduced-motion: reduce) { .ibtn.spin .ic { animation:none; } .ibtn:active { transition:none; } }
+/* no double-tap zoom, no 300 ms tap delay (iOS honours touch-action: manipulation) */
+html, body, button, input, select, textarea, label, a, .item, .srow, .lrow, .step, .segb, .cbrow, .unc-head, .keys button, .ibtn, .pbtn, .tbtn, .fbtn { touch-action:manipulation; }
 .qbadge { display:inline-flex; align-items:center; gap:6px; min-height:32px; max-width:100%; padding:4px 12px; border:0; border-radius:16px; background:var(--tonal); color:var(--on-tonal); font-size:13px; font-weight:500; line-height:1.3; cursor:pointer; text-align:left; }
 .qbadge::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--primary); flex:none; }
 .qbadge.bad { background:var(--bad-bg); color:var(--bad-ink); }
@@ -204,6 +213,9 @@ input[type=search] { -webkit-appearance:none; appearance:none; }
 .lrow:last-of-type { border-bottom:0; }
 .lrow .two { padding:6px 0; }
 .lrow.done .l1 { color:var(--mute); }
+.lrow.counted { background:var(--ok-bg); }
+.lrow.counted .l1 { color:var(--ink); }
+.lrow .l3.cnt { color:var(--ok-ink); font-weight:700; font-size:14px; }
 .lrow .chev { width:18px; height:18px; color:var(--faint); }
 .panel.bare .lrow { }
 .chk { width:20px; height:20px; color:var(--ok); }
@@ -338,6 +350,7 @@ body.sheet-open { overflow:hidden; }
     <div class="dots" id="dots" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
     <div class="padmsg" id="padMsg" role="alert"></div>
     <div class="keys" id="keys"></div>
+    <div class="padmsg" id="padLinkHint" hidden style="margin-top:14px;font-size:13px">ถ้าได้ลิงก์ใหม่ ให้เปิดลิงก์ใหม่นั้นแทน</div>
     <button type="button" class="tbtn" id="padBack" hidden style="margin-top:14px">ตั้งรหัสใหม่</button>
   </div>
 
@@ -349,6 +362,11 @@ body.sheet-open { overflow:hidden; }
         <button class="ibtn" id="refresh" type="button" aria-label="รีเฟรช"><svg class="ic" aria-hidden="true"><use href="#i-refresh-cw"/></svg></button>
       </div>
     </header>
+    <div id="installBox" class="stack" hidden>
+      <button type="button" class="pbtn" id="installBtn" hidden style="min-height:64px;font-size:20px;font-weight:600">ติดตั้งแอปลงหน้าจอ</button>
+      <div id="installPerm" class="sub" hidden style="font-size:14px;line-height:1.5">ถ้ากดติดตั้งแล้วไม่มีไอคอน: ตั้งค่า → แอป → Chrome → สิทธิ์ → เปิด 'ทางลัดหน้าจอหลัก'</div>
+      <div id="installHelp" class="sub" hidden style="font-size:14px;line-height:1.5;display:flex;gap:8px;align-items:flex-start"><span id="installHelpTxt" style="flex:1 1 auto"></span><button type="button" class="tbtn" id="installHelpX" aria-label="ปิดคำแนะนำ">ปิด</button></div>
+    </div>
     <div id="locBar" class="locbar" hidden><label for="locPick">ไปนับที่</label><select id="locPick"></select></div>
     <div id="notes" class="stack"></div>
     <div id="home">
@@ -392,6 +410,8 @@ body.sheet-open { overflow:hidden; }
       <div class="vf" id="scanVf"><video id="scanVideo" playsinline muted autoplay></video><div class="frame"></div><div class="line"></div><button type="button" class="zoom" id="scanZoom" hidden>2×</button><button type="button" class="torch" id="scanTorch" aria-label="ไฟฉาย" hidden><svg class="ic" aria-hidden="true"><use href="#i-flashlight"/></svg></button></div>
       <div id="scanHint" class="msg err" hidden>เล็งที่บาร์โค้ดแท่ง (เส้นขาวดำ) ไม่ใช่ QR</div>
       <div id="scanNote" class="sub">เล็งบาร์โค้ดให้อยู่ในกรอบ</div>
+      <div id="scanBusy" class="busy" role="status" hidden><span class="spinner" aria-hidden="true"></span><span>กำลังอ่านบาร์โค้ดจากรูป…</span></div>
+      <div id="scanFail" class="stack" hidden><button type="button" class="pbtn" id="scanRetake">ถ่ายใหม่</button><button type="button" class="tbtn c" id="scanLive">เปิดกล้องสดอีกครั้ง</button></div>
       <label class="tbtn c" id="scanPhoto"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg><span>ถ่ายรูปบาร์โค้ดแทน</span><input type="file" id="scanFile" accept="image/*" capture="environment"></label>
       <div class="sub">ถ้ากล้องสดเปิดไม่ได้ ให้ถ่ายรูปบาร์โค้ด หรือปิดหน้านี้แล้วพิมพ์รหัสแทน</div>
     </div>

@@ -46,6 +46,25 @@ var StockLib = (function () {
     try { o = saved ? JSON.parse(saved) : null; } catch (e) { return null; }
     return o && typeof o === 'object' ? L.parseHash('#x=' + encodeURIComponent(str(o.x)) + '&t=' + encodeURIComponent(str(o.t))) : null;
   };
+  /* ---- install help (Android): which browser / device the phone is, so the right hint shows ---- */
+  L.isAndroid = function (ua) { return /Android/i.test(str(ua)); };
+  L.isInAppBrowser = function (ua) { return /FBAN|FBAV|FB_IAB|Instagram|Messenger|\sLine\//.test(str(ua)); };
+  L.isLineAndroid = function (ua) { return L.isAndroid(ua) && /\sLine\//.test(str(ua)); };
+  L.isOemBrowser = function (ua) { return /MiuiBrowser|HeyTapBrowser|OppoBrowser/.test(str(ua)); };
+  L.isOemDevice = function (ua) { return /Xiaomi|Redmi|POCO|OPPO|realme|CPH\d|RMX\d/i.test(str(ua)) || /\bMI /.test(str(ua)); };
+  /** Which one-line hint to show: 'inapp' | 'oem' | '' (iOS and plain Chrome get none). canPrompt = Chrome already offered the install. */
+  L.isSamsungBrowser = function (ua) { return /SamsungBrowser/.test(str(ua)); };
+  L.installHelpKind = function (ua, canPrompt) {
+    if (!L.isAndroid(ua)) return '';
+    if (L.isInAppBrowser(ua)) return 'inapp';
+    if (L.isSamsungBrowser(ua) && !canPrompt) return 'samsung';
+    if (L.isOemBrowser(ua) && !canPrompt) return 'oem';
+    return '';
+  };
+  /** Chrome on a Xiaomi / OPPO / realme phone: the "Home screen shortcuts" permission is often off, so the icon never appears. */
+  L.showPermHint = function (ua) { return L.isAndroid(ua) && L.isOemDevice(ua) && !L.isInAppBrowser(ua) && !L.isOemBrowser(ua); };
+  L.INSTALL_HELP = { inapp: "เปิดในแอปนี้ติดตั้งไม่ได้ — กด ⋮ หรือ ... แล้วเลือก 'เปิดใน Chrome'", oem: 'ให้เปิดลิงก์นี้ใน Chrome แล้วกดปุ่มติดตั้ง', samsung: 'กดเมนู ≡ → เพิ่มหน้าไปที่ → หน้าจอหลัก' };
+
   L.execUrl = function (x) { return 'https://script.google.com/macros/s/' + x + '/exec'; };
 
   /* ---- requests ---- */
@@ -201,8 +220,22 @@ var StockLib = (function () {
       if (it.done && !f.showDone) continue;
       if (f.shelf && it.shelf !== f.shelf) continue;
       if (raw && L.normScan(part.code2).indexOf(qn) < 0 && part.name.toLowerCase().indexOf(raw) < 0) continue;
-      if (rows.length >= max) { hidden++; continue; }
       rows.push(it);
+    }
+    // counted rows (green) go to the bottom of their own shelf group; the order inside each part stays (list is already sorted by shelf, then code)
+    if (f.doneLast && f.showDone) {
+      var out = [], run = [], dn = [], i2;
+      for (i2 = 0; i2 <= rows.length; i2++) {
+        if (i2 === rows.length || (run.length + dn.length && rows[i2].shelf !== (run.length ? run[0] : dn[0]).shelf)) { out = out.concat(run, dn); run = []; dn = []; }
+        if (i2 < rows.length) (rows[i2].done ? dn : run).push(rows[i2]);
+      }
+      rows = out;
+    }
+    // the cap comes last, after uncounted-first ordering, so green counted rows never push uncounted ones into "ยังมีอีก N"
+    if (rows.length > max) {
+      var un = rows.filter(function (r) { return !r.done; }).length, quota = Math.max(0, max - un), cut = [], nu = 0;
+      rows.forEach(function (r) { if (!r.done) { if (nu++ < max) cut.push(r); } else if (quota > 0) { quota--; cut.push(r); } });
+      hidden = rows.length - cut.length; rows = cut;
     }
     return { rows: rows, hidden: hidden };
   };
@@ -228,6 +261,70 @@ var StockLib = (function () {
     var out = (locs || []).map(str).filter(Boolean);
     if (current && out.indexOf(str(current)) < 0 && out.length) out.push(str(current));
     return out.length > 1 ? out : [];
+  };
+
+  /* ---- v9: photo of a product that is not in DMS ---- */
+  L.PHOTO_PLANS = [[1280, 0.7], [1280, 0.55], [1024, 0.5], [800, 0.45]];   // [longest edge, JPEG quality] tried in turn until the picture is small enough
+  L.PHOTO_MAX_CHARS = 340000;                                               // data-URL length of about 250 KB
+  L.photoPlan = function (w, h, i) {
+    var p = L.PHOTO_PLANS[Math.min(Math.max(i, 0), L.PHOTO_PLANS.length - 1)], big = Math.max(Number(w) || 0, Number(h) || 0, 1), s = Math.min(1, p[0] / big);
+    return { w: Math.max(1, Math.round((Number(w) || 1) * s)), h: Math.max(1, Math.round((Number(h) || 1) * s)), q: p[1] };
+  };
+  /** The queue body of a photo (the picture itself is kept apart, in IndexedDB / memory, under the entry's request id). */
+  L.photoBody = function (code, shelf, qty, loc, countRid) { var b = { code: str(code), shelf: str(shelf), qty: String(qty) }; if (loc) b.loc = loc; if (countRid) b.countRid = str(countRid); return b; };
+  /** The body loc of a save: the place of the list the item came from (m.loc) when a place was picked, else '' (the server decides). */
+  L.saveLoc = function (m, pick) { return pick ? (str(m && m.loc) || pick) : ''; };
+  /** '' when an unknown code may be saved, else the Thai reason: quantity / shelf as before, and now the photo of the product. */
+  L.unknownCheck = function (qty, shelf, needShelf, photo) {
+    if (qty === '' || (needShelf && !str(shelf).trim()) || isNaN(Number(qty)) || Number(qty) < 0) return needShelf ? 'กรุณาใส่จำนวนและชื่อชั้นวาง' : 'กรุณาใส่จำนวนที่นับได้';
+    if (!photo) return 'ต้องถ่ายรูปสินค้าก่อน จึงจะบันทึกได้';
+    return '';
+  };
+
+  /* ---- v9: GPS pick of the location for a roaming counter ---- */
+  L.GEO_RADIUS_M = 300; L.GEO_MAX_ACC_M = 200; L.GEO_MARGIN_M = 150;
+  /** Distance in metres between two lat/lng points (haversine). */
+  L.geoMeters = function (a, b, c, d) {
+    var R = 6371000, r = Math.PI / 180, dLat = (c - a) * r, dLng = (d - b) * r;
+    var x = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(a * r) * Math.cos(c * r) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(x)));
+  };
+  /**
+   * The place GPS names, or ''. geo = {name: [lat, lng]} of ALL active places. The nearest place overall must be one of `choices` (the person's selectable places),
+   * distance + accuracy must be within the radius, and the second-nearest place must be at least `margin` metres farther. A broken or too-poor fix says nothing.
+   */
+  L.nearestLoc = function (fix, geo, choices, radius, maxAcc, margin) {
+    radius = radius || L.GEO_RADIUS_M; maxAcc = maxAcc || L.GEO_MAX_ACC_M; margin = margin === undefined ? L.GEO_MARGIN_M : margin;
+    if (!fix || !isFinite(fix.lat) || !isFinite(fix.lng) || Math.abs(fix.lat) > 90 || Math.abs(fix.lng) > 180) return '';
+    var acc = 0;
+    if (fix.acc !== undefined && fix.acc !== null) { acc = Number(fix.acc); if (!(acc <= maxAcc)) return ''; }
+    var all = [];
+    Object.keys(geo || {}).forEach(function (n) {
+      var g = geo[n]; if (!g || !isFinite(g[0]) || !isFinite(g[1])) return;
+      all.push({ n: n, d: L.geoMeters(fix.lat, fix.lng, Number(g[0]), Number(g[1])) });
+    });
+    all.sort(function (a, b) { return a.d - b.d; });
+    if (!all.length) return '';
+    var first = all[0];
+    if ((choices || []).indexOf(first.n) < 0) return '';
+    if (first.d + acc > radius) return '';
+    if (all.length > 1 && all[1].d - first.d < margin) return '';
+    return first.n;
+  };
+  /**
+   * What a GPS reading means. prev = the place GPS named last time (''), current = the place the list is on now, near = the place named now ('' = none).
+   * Switch only when GPS names a place that is not the current one AND is not the place it already named before (then the person chose the other one by hand, and that wins).
+   * Returns {place (the new "last GPS place"), switchTo ('' = stay)}.
+   */
+  L.geoDecide = function (prev, current, near) {
+    if (!near) return { place: '', switchTo: '' };
+    if (near === current || near === prev) return { place: near, switchTo: '' };
+    return { place: near, switchTo: near };
+  };
+  /** After a manual pick, GPS stays quiet until the phone is more than `radius` metres from where the pick happened (anchor = {lat, lng}). true = still held. */
+  L.geoHeld = function (anchor, fix, radius) {
+    if (!anchor || !fix || !isFinite(fix.lat) || !isFinite(fix.lng)) return !!anchor;
+    return L.geoMeters(anchor.lat, anchor.lng, fix.lat, fix.lng) <= (radius || L.GEO_RADIUS_M);
   };
 
   function sameShelf(a, b) {
@@ -283,10 +380,16 @@ var StockLib = (function () {
   L.newEntry = function (kind, rid, body, label, now, tok) { return { rid: rid, kind: kind, body: body, label: str(label), tries: 0, next: 0, born: now || 0, tok: str(tok) }; };
   L.qAdd = function (q, e) { q.push(e); return q; };
   /** The entry to send now (the oldest, when its retry time has come) or null. */
-  L.qDue = function (q, now) { return q.length && q[0].next <= now ? q[0] : null; };
+  L.qDue = function (q, now) {   // (a photo that waits for its retry never holds back the counts behind it; counts keep their order)
+    for (var i = 0; i < q.length; i++) { if (q[i].next <= now) return q[i]; if (q[i].kind !== 'photo') return null; }
+    return null;
+  };
+  L.qNextAt = function (q) { var m = Infinity; q.forEach(function (e) { if (e.next < m) m = e.next; }); return m; };
   L.qIndex = function (q, rid) { for (var i = 0; i < q.length; i++) if (q[i].rid === rid) return i; return -1; };
   L.qRetry = function (q, rid, now) { var i = L.qIndex(q, rid); if (i < 0) return null; q[i].tries++; q[i].next = now + L.backoffMs(q[i].tries); return q[i]; };
   L.qDrop = function (q, rid) { var i = L.qIndex(q, rid); if (i >= 0) q.splice(i, 1); return q; };
+  /** the automatic list refresh waits while counts are waiting to be sent; a waiting (even failing) picture does not hold it back */
+  L.syncHeld = function (q, manual) { return !manual && q.some(function (e) { return e.kind !== 'photo'; }); };
   L.qFailing = function (q) { return q.length > 0 && q[0].tries >= 2; };
   L.qSerialize = function (q, withPhoto) {
     return JSON.stringify(q.map(function (e) {
@@ -303,7 +406,7 @@ var StockLib = (function () {
     var a = null;
     try { a = JSON.parse(text); } catch (e) { a = null; }
     if (!Array.isArray(a)) return [];
-    return a.filter(function (e) { return e && typeof e === 'object' && typeof e.rid === 'string' && (e.kind === 'fc' || e.kind === 'daily') && e.body && typeof e.body === 'object' && (token === undefined || !e.tok || e.tok === token); })
+    return a.filter(function (e) { return e && typeof e === 'object' && typeof e.rid === 'string' && (e.kind === 'fc' || e.kind === 'daily' || e.kind === 'photo') && e.body && typeof e.body === 'object' && (token === undefined || !e.tok || e.tok === token); })
       .map(function (e) { var o = { rid: e.rid, kind: e.kind, body: e.body, label: str(e.label), tries: 0, next: 0, born: Number(e.born) || 0, tok: str(e.tok) || str(token) }; if (e.lostPhoto) o.lostPhoto = true; return o; });
   };
 
@@ -336,14 +439,16 @@ var StockLib = (function () {
   /** ZXing hints: 1D formats only (QR added only when withQr), TRY_HARDER on. ZX = the ZXing global. */
   L.zxHints = function (ZX, withQr) {
     var h = new Map(), F = ZX.BarcodeFormat, list = L.ONE_D_ZX.map(function (n) { return F[n]; });
-    if (withQr) list.push(F.QR_CODE);
+    if (withQr) { list.push(F.QR_CODE); if (F.DATA_MATRIX !== undefined) list.push(F.DATA_MATRIX); }
     h.set(ZX.DecodeHintType.POSSIBLE_FORMATS, list);
     h.set(ZX.DecodeHintType.TRY_HARDER, true);
     return h;
   };
   /** Decodes one luminance source (a canvas source in the page) with ZXing's MultiFormatReader: the text, or '' when nothing was found. */
-  L.zxDecodeSource = function (ZX, source, hints) {
+  L.zxDecodeSource = function (ZX, source, hints, invert) {
     try {
+      if (invert) { if (typeof ZX.InvertedLuminanceSource !== 'function') return ''; source = new ZX.InvertedLuminanceSource(source); }   // white-on-black labels
+      try { source.isRotateSupported = function () { return false; }; } catch (eR) { /* ZXing 0.21.3: the canvas source's rotate() is broken (it keeps width/height), so TRY_HARDER's turned retry decoded garbage and doubled the cost; turning is done by our own rotated canvas */ }
       var bitmap = new ZX.BinaryBitmap(new ZX.HybridBinarizer(source)), reader = new ZX.MultiFormatReader();
       return str(reader.decode(bitmap, hints).getText());
     } catch (e) { return ''; }
@@ -352,6 +457,35 @@ var StockLib = (function () {
   L.bandRect = function (vw, vh) {
     var sw = Math.max(1, Math.round(vw * 0.9)), sh = Math.max(1, Math.round(vh * 0.35));
     return { sx: Math.round((vw - sw) / 2), sy: Math.round((vh - sh) / 2), sw: sw, sh: sh };
+  };
+  /** Which view ZXing decodes on live frame n. Budget: the centre band (full resolution) gets at least 2 of every 3 frames; the third frame cycles whole frame (downscaled), inverted band, rotated strip, band. */
+  L.zxVariant = function (n) { var m = ((n % 12) + 12) % 12; return m % 3 !== 2 ? 'band' : ['full', 'inv', 'rot', 'band'][(m - 2) / 3]; };
+  L.LIVE_FULL_MAX = 960;   // the whole-frame live view is shrunk to this long edge before ZXing sees it (never a 1080x1920 decode on the main thread)
+  /** Photo decode plan for a picture of iw x ih pixels: views in the order tried, each {tag, sx, sy, sw, sh (source rectangle, NATIVE pixels), dw, dh (drawn size), rot (0/90/270), inv}.
+   *  Order: centre band (full width, 30% height, native), centre tile, whole picture (long edge <= 2000), centre vertical strip turned 90, the other 8 tiles of a 3x3 overlapping set (each <= 1600 px, native),
+   *  whole turned 90 and 270, the band and the whole inverted. A small barcode (30% of a 4032 px picture) is only readable at native size, so the crops come before the shrunk whole view's rotations. */
+  L.PHOTO_BUDGET_MS = 9000; L.PHOTO_WHOLE_MAX = 2000; L.PHOTO_TILE_MAX = 1600; L.PHOTO_BAND_MAX = 4200;
+  L.photoViewPlan = function (iw, ih) {
+    iw = Math.max(1, Math.round(Number(iw) || 0)); ih = Math.max(1, Math.round(Number(ih) || 0));
+    var seen = {};
+    var mk = function (tag, sx, sy, sw, sh, cap, rot, inv) {
+      sw = Math.min(sw, iw); sh = Math.min(sh, ih); sx = Math.max(0, Math.min(iw - sw, sx)); sy = Math.max(0, Math.min(ih - sh, sy));
+      var key = [sx, sy, sw, sh, rot, inv ? 1 : 0, cap].join(), k = Math.min(1, cap / Math.max(sw, sh));
+      if (seen[key]) return null; seen[key] = 1;
+      return { tag: tag, sx: sx, sy: sy, sw: sw, sh: sh, dw: Math.max(1, Math.round(sw * k)), dh: Math.max(1, Math.round(sh * k)), rot: rot || 0, inv: !!inv };
+    };
+    var out = [], push = function (v) { if (v) out.push(v); };
+    var bh = Math.max(1, Math.round(ih * 0.3)), by = Math.round((ih - bh) / 2), vw = Math.max(1, Math.round(iw * 0.3));
+    var tw = Math.min(L.PHOTO_TILE_MAX, iw), th = Math.min(L.PHOTO_TILE_MAX, ih), gx = Math.round((iw - tw) / 2), gy = Math.round((ih - th) / 2), tiles = [];
+    if (tw * th < 0.85 * iw * ih) [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(function (o) { var v = mk('tile', gx + o[0] * gx, gy + o[1] * gy, tw, th, L.PHOTO_TILE_MAX, 0, false); if (v) tiles.push(v); });
+    push(mk('band', 0, by, iw, bh, L.PHOTO_BAND_MAX, 0, false));
+    if (tiles.length) push(tiles.shift());
+    push(mk('whole', 0, 0, iw, ih, L.PHOTO_WHOLE_MAX, 0, false));
+    push(mk('vband', Math.round((iw - vw) / 2), 0, vw, ih, L.PHOTO_BAND_MAX, 90, false));
+    tiles.forEach(push);
+    push(mk('rot90', 0, 0, iw, ih, L.PHOTO_WHOLE_MAX, 90, false)); push(mk('rot270', 0, 0, iw, ih, L.PHOTO_WHOLE_MAX, 270, false));
+    push(mk('invband', 0, by, iw, bh, L.PHOTO_BAND_MAX, 0, true)); push(mk('inv', 0, 0, iw, ih, L.PHOTO_WHOLE_MAX, 0, true));
+    return out;
   };
   /** Which engine the live scan starts with: 'native' only when getSupportedFormats() lists code_128 or code_39 (many Android builds expose a BarcodeDetector that supports nothing), else 'zxing'. */
   L.pickEngine = function (supported) {
@@ -370,6 +504,15 @@ var StockLib = (function () {
     });
     return best ? best.id : '';
   };
+  /** iPhone / iPad (also iPadOS posing as a Mac): the camera pick below is only for these. */
+  L.isIOS = function (ua, platform, touchPoints) { return /iPad|iPhone|iPod/.test(str(ua)) || (str(platform) === 'MacIntel' && Number(touchPoints) > 1); };
+  /** iOS camera pick (labels readable after permission): "Back Triple Camera", else "Back Dual Wide Camera" (both switch to the macro lens for close focus by themselves), else "Back Dual Camera".
+   *  Returns {id, virtual: true} or null (keep facingMode environment). */
+  L.pickIosCamera = function (devices) {
+    var pats = [/back triple camera/i, /back dual wide camera/i, /back dual camera/i], list = (devices || []).filter(function (d) { return d && d.kind === 'videoinput' && d.deviceId; });
+    for (var i = 0; i < pats.length; i++) for (var j = 0; j < list.length; j++) if (pats[i].test(String(list[j].label || ''))) return { id: list[j].deviceId, virtual: true };
+    return null;
+  };
   /** A saved engine note ('zx:<ms>') is valid for 7 days; anything else (old 'zx', junk, expired) is ignored. */
   L.engineSavedValid = function (v, now) {
     var m = /^zx:(\d+)$/.exec(String(v || '')); if (!m) return false;
@@ -386,21 +529,48 @@ var StockLib = (function () {
     var one = all.filter(function (x) { return L.ONE_D_NATIVE.indexOf(x.format) >= 0; })[0] || all[0];
     return one ? str(one.rawValue) : '';
   };
-  /** A read that can be a part code: no link, and after normScan only A-Z / 0-9, 5 to 20 characters. */
+  /** A read that can be a part code: no link, and after normScan only A-Z / 0-9, 5 to 20 characters (real DMS codes are at most 14, the longest is SUN4281061435T; the rest is slack for odd labels). */
   L.isPlausibleCode = function (text) {
     var raw = str(text);
     if (/:\/\/|www\./i.test(raw)) return false;
     return /^[A-Z0-9]{5,20}$/.test(L.normScan(raw));
+  };
+  /** The usable codes in a read, best first: the read itself when it is plausible, then the part before a trailing quantity / lot suffix ("5TL-H1919-00/12", "...+3", "... 12", "....5"). [] = rejected. */
+  L.readCandidates = function (text, m) {
+    var raw = str(text), out = [];
+    if (!raw || /:\/\/|www\./i.test(raw)) return out;
+    if (L.isPlausibleCode(raw)) out.push(raw);
+    var first = raw.replace(/^[\s'\u2018\u2019\u02bc`]+/, '').split(/[\/+.\s]/)[0];
+    // the prefix is only used when it is an exact part of the list (m = the loaded list): a prefix-only read never makes an unknown card, unknown cards come from the raw read
+    if (first && m && L.isPlausibleCode(first) && L.findPart(m, first) >= 0 && (!out.length || L.normScan(first) !== L.normScan(raw))) out.push(first);
+    return out;
+  };
+  /** The short Thai note for a read that is not a part code (the raw text is shown, cut at 40 characters); '' for nothing. */
+  L.rejectMsg = function (raw) {
+    var t = str(raw).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!t) return '';
+    return 'อ่านได้: ' + (t.length > 40 ? t.slice(0, 40) + '…' : t) + ' — ไม่ใช่รหัสอะไหล่';
+  };
+  /** One note per distinct raw value: note(raw) returns the message the first time, '' afterwards (a scan session = one of these). */
+  L.makeRejectNotes = function () {
+    var seen = {}, n = 0;
+    return { note: function (raw) {
+      var m = L.rejectMsg(raw); if (!m) return '';
+      var key = str(raw).trim(); if (seen[key]) return '';
+      if (++n > 200) { seen = {}; n = 1; }
+      seen[key] = 1; return m;
+    } };
   };
   /** A typed code long enough to be a whole part code (a plausible code of 12+ normalised characters, e.g. 90793-AT479-00): if it is not in the list it is an unlisted product, not a half-typed search. */
   L.isFullCode = function (text) {
     return L.isPlausibleCode(text) && L.normScan(text).length >= 12;
   };
   /** 'empty' (nothing read) | 'ignored' (something read that is not a part code: silently dropped) | 'plausible' (+ n = its normalised text) */
-  L.readClass = function (text) {
+  L.readClass = function (text, m) {
     if (!str(text)) return { kind: 'empty', n: '' };
-    if (!L.isPlausibleCode(text)) return { kind: 'ignored', n: '' };
-    return { kind: 'plausible', n: L.normScan(text) };
+    var c = L.readCandidates(text, m);
+    if (!c.length) return { kind: 'ignored', n: '' };
+    return { kind: 'plausible', n: L.normScan(c[0]), text: c[0], cands: c };
   };
   /** The "not found" card needs the same plausible code twice in a row (a different plausible code starts the count again; empty frames do not reset it). */
   L.makeConfirm = function () {
@@ -422,11 +592,11 @@ var StockLib = (function () {
     return h;
   };
   /** Camera zoom: from the track capabilities ({zoom:{min,max,step}}) -> {min, max, def}; def = about 2x (or the maximum when it is lower). null when the camera cannot zoom. */
-  L.zoomPlan = function (caps) {
+  L.zoomPlan = function (caps, want) {
     var z = caps && caps.zoom;
     if (!z || typeof z !== 'object' || !(Number(z.max) > Number(z.min))) return null;
     var min = Number(z.min) || 1, max = Number(z.max);
-    return { min: min, max: max, def: Math.max(min, Math.min(2, max)) };
+    return { min: min, max: max, def: Math.max(min, Math.min(Number(want) > 0 ? Number(want) : 2, max)) };
   };
   L.zoomLabel = function (z) { return (Math.round(z * 10) / 10) + '×'; };
   L.HINT_1D = 'เล็งที่บาร์โค้ดแท่ง (เส้นขาวดำ) ไม่ใช่ QR';
@@ -497,7 +667,7 @@ if (typeof document !== 'undefined') (function () {
   var verified = false, probing = false, pendingPin = null, paused = false;
   var Q = [], inflight = false, pumpTimer = null, syncTimer = null, toastTimer = null, lockTimer = null, undoMap = {};
   var ST = { q: '', shelf: '', showDone: false, tab: 'first', expanded: false };
-  var card = null, notes = [], prefill = {}, loadedAt = 0, noStore = false, offline = false, reloadWhenEmpty = false, lostList = [], offTimer = null;
+  var reloading = false, card = null, notes = [], prefill = {}, draft = {}, loadedAt = 0, noStore = false, offline = false, reloadWhenEmpty = false, lostList = [], offTimer = null;
   var KX = 'sc5.x';                  // the deployment id (execId) this phone has used successfully
 
   function $(id) { return document.getElementById(id); }
@@ -545,18 +715,24 @@ if (typeof document !== 'undefined') (function () {
     } catch (e) { /* no sound: fine */ }
   }
   function buzz(p) { try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
-  function toast(msg) {
+  function toast(msg, ms) {
     var t = $('toast'); t.textContent = msg; t.hidden = false;
-    clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, 1800);
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, ms || 1800);
   }
 
   /* ---------------- network ---------------- */
   var NET = { ok: false, code: 'NET', error: 'เชื่อมต่อไม่ได้ ตรวจสอบสัญญาณแล้วลองใหม่' };
+  var locCache = {};   // v9: the last list the server sent for each place (this session only), shown at once when switching back while the fresh one loads
   var pickLoc = '';   // v7: the location a roaming person picked (empty = the server decides)
   function api(action, extra, cb, timeoutMs, token) {
     if (pickLoc && (action === 'boot' || action === 'sync' || action === 'daily')) { var ex = {}; Object.keys(extra || {}).forEach(function (k) { ex[k] = extra[k]; }); ex.loc = pickLoc; extra = ex; }
+    var asked = (action === 'boot' || action === 'sync' || action === 'daily') ? pickLoc : null;   // the place this request asked for (a reply is judged against it)
     var body = L.makeRequest(token || T.t, PIN, action, extra), ctl = null, to = null, finished = false;
-    function fin(res) { if (finished) return; finished = true; clearTimeout(to); cb(res); }
+    function fin(res) {
+      if (finished) return; finished = true; clearTimeout(to);
+      if (asked !== null && res && typeof res === 'object' && res !== NET) { try { Object.defineProperty(res, '_asked', { value: asked, enumerable: false, configurable: true }); } catch (e) { /* ignore */ } }
+      cb(res);
+    }
     try {
       if (typeof AbortController !== 'undefined') { ctl = new AbortController(); to = setTimeout(function () { try { ctl.abort(); } catch (e) { /* ignore */ } }, timeoutMs || 30000); }
       window.fetch(EXEC, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body), redirect: 'follow', credentials: 'omit', cache: 'no-store', signal: ctl ? ctl.signal : undefined })
@@ -585,9 +761,10 @@ if (typeof document !== 'undefined') (function () {
   function drawSetMode() { $('padSub').textContent = SET_TXT[setMode]; $('padBack').hidden = setMode !== 'confirm'; }
   function showPad(msg, locked, set) {
     camStop(); PIN = null; padBuf = ''; padBusy = false; verified = false; drawDots();
+    clearTimeout(rebootTimer); rebootGen++;   // a pending place-switch reboot must not go out with PIN=null (a wrong try server-side); it resumes after the PIN is accepted
     setMode = set ? 'enter' : ''; firstPin = ''; drawSetMode();
-    if (locked && linkFromStore) store.del(KLINK);   // a saved link that ends in LOCK is stale or revoked: forget it, the next open shows the no-link message
     $('app').hidden = true; $('pad').hidden = false;
+    $('padLinkHint').hidden = !linkFromStore;   // a saved (old) link may be dead: tell the person where to look, nothing else changes
     if (!$('scan').hidden) closeScan();   // closeScan also syncs the back-history entry; any open card is kept as it was
     $('padMsg').textContent = msg || ''; lockKeys(!!locked);
     clearTimeout(syncTimer); clearTimeout(lockTimer);
@@ -639,7 +816,7 @@ if (typeof document !== 'undefined') (function () {
   }
   function onBoot(res, fromPad) {
     var c = L.classify(res);
-    if (c === 'ok') { PIN = PIN === null || PIN === undefined ? null : PIN; acceptBoot(res, false); return; }
+    if (c === 'ok') { PIN = PIN === null || PIN === undefined ? null : PIN; acceptBoot(res, false); if (switching()) reboot(); return; }   // (a place switch that the pad interrupted goes on)
     if (c === 'pin') {
       var locked = res.code === 'LOCK';
       if (res.code === 'SETPIN') { pendingPin = null; showPad('', false, true); return; }   // choose a code first (nothing was typed wrong)
@@ -675,8 +852,18 @@ if (typeof document !== 'undefined') (function () {
   }
 
   /** A fresh list from the server (boot or sync): replaces the model, keeps what is still waiting in the queue marked as counted. */
-  function acceptBoot(res, unverified) {
-    if (res.mode === 'daily') { M = null; D = res; } else { D = null; M = L.makeModel(res); }
+  /** true while the person has picked another place but the list on screen is still the old place's (the fresh one is on its way) */
+  function switching() { return !!(M && pickLoc && M.loc && M.loc !== pickLoc); }
+  var rebootFails = 0;   // failed boots of the pending place switch (0 = none yet)
+  function switchMsg() { return rebootFails > 0 && M ? 'ไม่มีสัญญาณ — เลือก ' + M.loc + ' กลับเพื่อนับต่อ' : 'กำลังโหลดรายการของ ' + pickLoc + '…'; }
+  function switchBlocked() { if (!switching()) return false; toast(switchMsg()); return true; }
+  function subText() { var src = M || D || {}; return L.headerSub(today(), !!M, src.loc) + (switching() ? ' · ' + switchMsg() : ''); }
+  function acceptBoot(res, unverified, noDraw) {
+    if (res.mode !== 'daily' && pickLoc && res.loc && res.loc !== pickLoc && res._asked !== undefined && res._asked !== pickLoc) return;   // a late reply to a request sent before the switch: dropped (the list of the picked place is on its way)
+    if (res.mode !== 'daily' && pickLoc && res.loc && res.loc !== pickLoc && (res.locs || []).indexOf(pickLoc) >= 0) return;   // a late reply for a place the person has since left: dropped
+    if (res.mode !== 'daily' && pickLoc && res.loc && res.loc !== pickLoc && res._asked === pickLoc) { pickLoc = res.loc; try { $('locPick').value = res.loc; } catch (e) { /* ignore */ } }   // the server did not take the pick (not one of this person's places): follow the list it sent, never stay blocked
+    if (res.mode === 'daily') { M = null; D = res; geoMap = {}; } else { D = null; M = L.makeModel(res); }
+    if (res.mode !== 'daily') { geoMap = res.geo && typeof res.geo === 'object' ? res.geo : {}; if (!unverified && res.loc) locCache[res.loc] = { at: Date.now(), res: JSON.stringify(res) }; }
     undoMap = {};
     Q.forEach(function (e) { overlay(e); });
     if (lostList.length) {   // entries whose photo could not be kept: the card comes back asking for a new photo
@@ -690,25 +877,110 @@ if (typeof document !== 'undefined') (function () {
       if (!store.set(KL, s)) noStore = true;
     }
     $('pad').hidden = true; $('app').hidden = false;
-    render();
-    if (!unverified) { schedSync(); pump(); }
+    if (noDraw) { $('who').textContent = 'สวัสดี ' + who(); renderBadge(); renderNotes(); redrawLater = true; } else render();
+    if (card && !card.unknown && card.mode === 'scan' && !card.camMsg && !card.locked && !$('card').hidden) drawCard();   // the PIN pad stopped the piece camera: bring it back with the card
+    if (!unverified && !udTried) { udTried = true; udRestore(); }
+    if (!unverified) { schedSync(); pump(); if (!geoStarted) { geoStarted = true; geoCheck(); } else geoFlush(); }
+  }
+  var redrawLater = false;
+
+  /* ---------------- v9: GPS picks the place for a roaming counter ---------------- */
+  var geoLock = null, geoMap = {}, geoPlace = '', geoStarted = false, geoBusy = false, geoWait = false, geoHinted = false;
+  function geoIdle() {
+    if (!(verified && M && !D && !card && $('pad').hidden && $('scan').hidden && !$('app').hidden)) return false;
+    try {
+      var a = document.activeElement; if (a && a.tagName && /^(INPUT|TEXTAREA|SELECT)$/i.test(a.tagName)) return false;
+      if ($('codeIn').value.trim() || $('codeSug').childNodes.length) return false;
+    } catch (e) { /* ignore */ }
+    return !editingDaily();
+  }
+  function geoChoices() { var src = M || D; return src ? L.locChoices(src.locs, src.loc) : []; }
+  /** Ask the phone where it is (at start and when the page comes back); only for a roaming person with a place list and known coordinates. Never nags. */
+  function geoCheck() {
+    try {
+      if (!verified || geoBusy || !navigator.geolocation || !geoChoices().length || !Object.keys(geoMap).length) return;
+      geoBusy = true;
+      navigator.geolocation.getCurrentPosition(function (pos) {
+        geoBusy = false;
+        try { geoOnFix({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy }); } catch (e) { /* ignore */ }
+      }, function (err) {
+        geoBusy = false;
+        if (err && err.code === 1 && !geoHinted) { geoHinted = true; notes.push({ id: 'geo', kind: 'info', text: 'เปิดสิทธิ์ตำแหน่ง (GPS) ให้แอปนี้ เพื่อให้เปลี่ยนสถานที่ให้อัตโนมัติ ตอนนี้เลือกสถานที่เองได้ตามเดิม' }); renderNotes(); }
+      }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+    } catch (e) { geoBusy = false; }
+  }
+  function geoOnFix(fix) {
+    var src = M || D; if (!src) return;
+    if (geoLock) {   // the person chose a place by hand: GPS waits until the phone has really moved away from where that happened
+      if (!geoLock.at) geoLock.at = { lat: fix.lat, lng: fix.lng };
+      if (L.geoHeld(geoLock.at, fix)) return;
+      geoLock = null;
+    }
+    var d = L.geoDecide(geoPlace, src.loc, L.nearestLoc(fix, geoMap, geoChoices()));
+    if (d.switchTo && !geoIdle()) { geoWait = true; return; }   // a card or the PIN pad is open: nothing changes now; asked again when it closes
+    geoPlace = d.place;
+    if (d.switchTo) switchLoc(d.switchTo, true);
+  }
+  /** Called when a card / the scan sheet / the pad has closed: a switch that had to wait is decided again with a fresh reading. */
+  function geoFlush() { if (geoWait && geoIdle()) { geoWait = false; geoCheck(); } }
+  /** The same as choosing the place in the dropdown (auto = GPS did it: say so). */
+  function switchLoc(name, auto) {
+    pickLoc = name; rebootFails = 0; ST.tab = 'first'; ST.shelf = '';
+    if (!auto) { geoLock = { at: null }; geoCheck(); }   // (a fresh reading marks where the hand pick happened)
+    if (card) backHome();
+    try { $('locPick').value = name; } catch (e) { /* ignore */ }
+    var hit = locCache[name];
+    if (hit && verified && Date.now() - hit.at < 600000) { try { acceptBoot(JSON.parse(hit.res), true); } catch (e) { /* the fresh list follows anyway */ } }   // (remembered list: shown at once; the fresh one replaces it in a moment)
+    $('sub').textContent = subText();
+    reboot();
+    if (auto) toast('ตอนนี้อยู่ที่ ' + name + ' — เปลี่ยนให้แล้ว', 4000);
+  }
+  /** true while a daily card holds typed text / a photo that is not sent yet, or one of its boxes has the cursor */
+  function editingDaily() {
+    var items = (D && D.items) || [], i, d;
+    for (i = 0; i < items.length; i++) { d = !items[i].done && draft[items[i].id]; if (d && (d.crates || d.per || d.loose || d.foundAt || d.photo)) return true; }
+    try { var a = document.activeElement; if (a && a.tagName && /^(INPUT|TEXTAREA)$/i.test(a.tagName) && $('dList').contains && $('dList').contains(a)) return true; } catch (e) { /* ignore */ }
+    return false;
   }
   function overlay(e) {   // a queued (not yet confirmed) save shows as done
     if (e.kind === 'fc' && M) { var u = L.applySave(M, e.body, M.counter, M.dateText); if (u) undoMap[e.rid] = u; }
     if (e.kind === 'daily' && D && D.items) D.items.forEach(function (it) { if (it.id === e.body.id && !it.done) { it.done = true; D.done = (D.done || 0) + 1; undoMap[e.rid] = { daily: it }; } });
   }
-  function reboot() { api('boot', {}, function (res) { var c = L.classify(res); if (c === 'ok') acceptBoot(res, false); else if (c === 'pin') showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN'); }); }
+  var rebootTimer = null, rebootGen = 0;
+  /** boot again (after a switch / mode change); a failed try (no signal, busy) is repeated with a growing wait while a place switch is pending */
+  function reboot(n) {
+    n = n || 0; clearTimeout(rebootTimer); var gen = ++rebootGen;
+    api('boot', {}, function (res) {
+      if (gen !== rebootGen) return;
+      var c = L.classify(res);
+      if (c === 'ok') { rebootFails = 0; acceptBoot(res, false); }
+      else if (c === 'pin') showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN');
+      else if (c === 'retry') { if (switching()) { rebootFails = n + 1; try { $('sub').textContent = subText(); } catch (e) { /* ignore */ } } if (switching()) rebootTimer = setTimeout(function () { reboot(n + 1); }, Math.min(30000, 2000 * Math.pow(2, n))); }
+      else if (switching()) { pickLoc = M.loc; try { $('locPick').value = M.loc; } catch (e) { /* ignore */ } $('sub').textContent = subText(); }   // refused: stay on the list we have, unblocked
+    });
+  }
 
   function schedSync() {
     clearTimeout(syncTimer);
     var waiting = (M && M.state !== 'open') || (D && D.state !== 'open');
     syncTimer = setTimeout(function () { doSync(); }, waiting ? WAIT_POLL_MS : SYNC_MS);
   }
+  /** the refresh button: pressed state is CSS (:active); while a manual refresh runs the icon spins (class .spin) and further taps are ignored */
+  var refreshBusy = false, refreshTimer = null;
+  function refreshSpin(on) {
+    refreshBusy = !!on; clearTimeout(refreshTimer);
+    var b = $('refresh'); if (b) { b.classList.toggle('spin', !!on); b.setAttribute('aria-busy', on ? 'true' : 'false'); }
+    if (on) refreshTimer = setTimeout(function () { refreshSpin(false); }, 30000);   // never spin forever
+  }
   function doSync(manual) {
-    if (!verified || document.hidden || card || inflight || (Q.length && !manual)) { schedSync(); return; }
+    if (!verified || document.hidden || card || inflight || L.syncHeld(Q, manual)) { if (manual) refreshSpin(false); schedSync(); return; }   // (a waiting picture does not hold the list back)
     api('sync', { v: M ? M.v : '' }, function (res) {
       var c = L.classify(res);
-      if (c === 'ok') { if (res.same) { loadedAt = Date.now(); if (manual) toast('รายการเป็นปัจจุบันแล้ว'); } else if (!card) acceptBoot(res, false); }
+      if (manual) refreshSpin(false);
+      if (c === 'ok') {
+        if (res.same) { loadedAt = Date.now(); if (manual) toast('อัปเดตแล้ว'); }
+        else if (!card) { if (D && editingDaily()) { acceptBoot(res, false, true); } else acceptBoot(res, false); if (manual) toast('อัปเดตแล้ว'); }   // a half-typed daily card: take the data, draw it later
+      }
       else if (c === 'pin') { showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN'); return; }
       else if (manual) toast(res.error || NET.error);
       schedSync();
@@ -722,9 +994,77 @@ if (typeof document !== 'undefined') (function () {
     if (store.set(KQ, L.qSerialize(Q, true))) { noStore = false; return; }
     if (!store.set(KQ, L.qSerialize(Q, false))) noStore = true;   // photos too big for the phone's storage, or no storage at all: keep the page open
   }
+  /** The pictures waiting to be sent: in memory at once, and in IndexedDB (not in the 5 MB localStorage where the queue lives). Without IndexedDB they live in memory only. */
+  var pstore = (function () {
+    var mem = Object.create(null), memOnly = Object.create(null), db = null, failed = false, waiters = null, OPEN_MS = 3000, GET_MS = 5000;
+    /** a late open: pictures saved to memory while it hung are written now (until then they count as memory-only) */
+    function flushMem(d) { try { var t = d.transaction('p', 'readwrite'), st = t.objectStore('p'), snap = Object.create(null); Object.keys(mem).forEach(function (k) { snap[k] = mem[k]; st.put(mem[k], k); }); t.oncomplete = function () { Object.keys(snap).forEach(function (k) { if (mem[k] === snap[k]) delete memOnly[k]; }); if (api2.onFlushed) api2.onFlushed(); }; } catch (e) { /* stays memory-only */ } }
+    function open(cb) {
+      if (db || failed) { cb(db); return; }
+      if (waiters) { waiters.push(cb); return; }
+      waiters = [cb];
+      var timer = null;
+      function done(d) { clearTimeout(timer); if (!waiters) { if (d && !db) { db = d; failed = false; flushMem(d); } return; } db = d; failed = !d; var w = waiters; waiters = null; w.forEach(function (f) { f(d); }); }
+      try {
+        var idb = window.indexedDB; if (!idb) { done(null); return; }
+        timer = setTimeout(function () { done(null); }, OPEN_MS);   // iOS sometimes never calls back: give up (memory only) - a late success is still used
+        var r = idb.open('sc5photos', 1);
+        r.onupgradeneeded = function () { try { r.result.createObjectStore('p'); } catch (e) { /* ignore */ } };
+        r.onsuccess = function () { done(r.result); };
+        r.onerror = r.onblocked = function () { done(null); };
+      } catch (e) { done(null); }
+    }
+    var api2 = {
+      put: function (k, v, cb) {
+        mem[k] = v; memOnly[k] = 1;
+        open(function (d) {
+          if (!d) { cb(); return; }
+          var fin = false; function once() { if (!fin) { fin = true; cb(); } }
+          try { var t = d.transaction('p', 'readwrite'); t.objectStore('p').put(v, k); t.oncomplete = function () { delete memOnly[k]; once(); }; t.onerror = t.onabort = once; setTimeout(once, GET_MS); } catch (e) { once(); }
+        });
+      },
+      /** cb(data, status): status 'ok' | 'none' (the storage truly has no such picture) | 'err' (could not ask: try again later, the picture may well be there) */
+      get: function (k, cb) {
+        if (mem[k]) { cb(mem[k], 'ok'); return; }
+        var fin = false; function once(v, st) { if (!fin) { fin = true; cb(v, st); } }
+        var gt = setTimeout(function () { once(null, 'err'); }, GET_MS);
+        function end(v, st) { clearTimeout(gt); once(v, st); }
+        if (!window.indexedDB) { end(null, 'none'); return; }
+        open(function (d) {
+          if (!d) { end(null, 'err'); return; }
+          try { var r = d.transaction('p', 'readonly').objectStore('p').get(k); r.onsuccess = function () { end(r.result || null, r.result ? 'ok' : 'none'); }; r.onerror = function () { end(null, 'err'); }; } catch (e) { end(null, 'err'); }
+        });
+      },
+      del: function (k) {
+        delete mem[k]; delete memOnly[k];
+        open(function (d) { if (!d) return; try { d.transaction('p', 'readwrite').objectStore('p').delete(k); } catch (e) { /* ignore */ } });
+      },
+      /** forget a broken connection so the next call opens again */
+      reset: function () { db = null; failed = false; },
+      /** false when a picture lives only in memory (no IndexedDB, or it failed to open); a not-yet-opened db with no memory-only picture is fine (they are in IDB) */
+      durable: function () { return !!window.indexedDB && !failed && !Object.keys(memOnly).length; }
+    };
+    return api2;
+  })();
+  /** true when a waiting picture exists only in this page's memory: closing or reloading the page would lose it (same care as no storage) */
+  pstore.onFlushed = function () { renderNotes(); };
+  function memOnlyPhotos() { return Q.some(function (e) { return e.kind === 'photo'; }) && !pstore.durable(); }
+  /** The photo goes as its OWN request after the count (a slow or failed photo never holds the count back); it is queued only once the picture is stored. */
+  var refusedCounts = Object.create(null), photoErrs = Object.create(null), PHOTO_ERR_MS = 5 * 60 * 1000, PHOTO_GIVEUP_MS = 30 * 60 * 1000;   // refused count rids; when each waiting picture's storage first answered 'err' (in a row)
+  function enqueuePhoto(code, shelf, qty, loc, data, countRid) {
+    var rid = L.makeRid(window.crypto, Math.random), tok = T.t;
+    if (countRid && refusedCounts[countRid]) return;   // its count was already refused: no picture to send
+    // the picture is in memory the moment put() is called, so the entry is queued and saved at once (a hanging IndexedDB must not lose it); the store is only the backup
+    pstore.put(rid, data, function () {
+      if (countRid && refusedCounts[countRid]) { L.qDrop(Q, rid); pstore.del(rid); persistQ(); renderBadge(); }   // its count was refused while the picture was being stored: never sent
+    });
+    L.qAdd(Q, L.newEntry('photo', rid, L.photoBody(code, shelf, qty, loc, countRid), 'รูป ' + code, Date.now(), tok));
+    persistQ(); renderBadge(); renderNotes(); pump();
+  }
   function enqueue(kind, body, label) {
     if (!verified) { toast('ยังบันทึกไม่ได้ รอให้ระบบตรวจรหัสก่อน'); return null; }   // never queue (or send) before the server has accepted a PIN in this page load
     var e = L.newEntry(kind, L.makeRid(window.crypto, Math.random), body, label, Date.now(), T.t);
+    if (kind === 'fc') delete locCache[body.loc || (M || {}).loc];
     L.qAdd(Q, e); persistQ(); overlay(e); renderBadge(); pump();
     return e;
   }
@@ -732,8 +1072,28 @@ if (typeof document !== 'undefined') (function () {
     clearTimeout(pumpTimer);
     if (inflight || !Q.length || !verified || paused) return;
     var now = Date.now(), e = L.qDue(Q, now);
-    if (!e) { pumpTimer = setTimeout(pump, Math.max(300, Q[0].next - now)); return; }
-    if (e.tok && e.tok !== T.t) { L.qDrop(Q, e.rid); persistQ(); renderBadge(); pump(); return; }   // never send under another link's token
+    if (!e) { pumpTimer = setTimeout(pump, Math.max(300, L.qNextAt(Q) - now)); return; }
+    if (e.tok && e.tok !== T.t) { L.qDrop(Q, e.rid); if (e.kind === 'photo') pstore.del(e.rid); persistQ(); renderBadge(); pump(); return; }
+    if (e.kind === 'photo') {
+      inflight = true;
+      pstore.get(e.rid, function (data, st) {
+        if (!data) {
+          inflight = false;
+          if (st === 'err' && (photoErrs[e.rid] = photoErrs[e.rid] || Date.now(), Date.now() - photoErrs[e.rid] < PHOTO_ERR_MS)) {   // the storage could not be asked (or hung): the picture may well be there - try again later, counts go on meanwhile
+            pstore.reset(); L.qRetry(Q, e.rid, Date.now()); persistQ(); renderBadge(); pump(); return;
+          }
+          delete photoErrs[e.rid]; pstore.del(e.rid);   // no orphan picture stays in IDB
+          // the storage truly has no such picture (browser cleared it, or it kept failing for 5 minutes): the count was saved on its own, only the photo is missing
+          L.qDrop(Q, e.rid); persistQ();
+          notes.push({ id: e.rid, kind: 'err', text: 'รูปของ ' + e.body.code + ' หายไป (จำนวนบันทึกแล้ว) กรุณาแจ้งเจ้าของร้านหรือถ่ายรูปส่งให้' });
+          renderBadge(); pump(); return;
+        }
+        delete photoErrs[e.rid];
+        if (!verified || paused) { inflight = false; return; }   // a PIN pad opened while the picture was being read: nothing is sent now (it goes on after the PIN)
+        api('photoSave', { rid: e.rid, code: e.body.code, shelf: e.body.shelf, qty: e.body.qty, loc: e.body.loc || '', photo: data }, function (res) { inflight = false; sent(e, res); }, 60000, e.tok);
+      });
+      return;
+    }   // never send under another link's token
     inflight = true;
     var extra = e.kind === 'fc' ? { rid: e.rid, entry: e.body } : (function () { var x = { rid: e.rid }; Object.keys(e.body).forEach(function (k) { x[k] = e.body[k]; }); return x; })();
     api(e.kind === 'fc' ? 'save' : 'dailySave', extra, function (res) { inflight = false; sent(e, res); }, 45000, e.tok);
@@ -742,11 +1102,18 @@ if (typeof document !== 'undefined') (function () {
     var c = L.classify(res);
     if (c === 'ok') {
       L.qDrop(Q, e.rid); persistQ(); delete undoMap[e.rid];
+      if (e.kind === 'photo') pstore.del(e.rid);
+      if (e.kind === 'fc') delete locCache[e.body.loc || (M || {}).loc];   // a save here: that place's remembered list is no longer true
+      if (e.kind === 'daily') { delete draft[e.body.id]; if (redrawLater && D && !card && !editingDaily()) { redrawLater = false; renderDaily(); } }
       if (e.kind === 'fc' && M && res.progress && !Q.length) { M.progress.done = res.progress.done; M.progress.total = res.progress.total; M.progress.pct = res.progress.pct; M.progress.mine = res.progress.mine; if (!card && !$('app').hidden) renderProg(); }
       if (res.replacedOther) notes.push({ id: e.rid, kind: 'info', text: 'แทนที่การนับของ ' + res.replacedOther + ' วันนี้' });
       if (e.kind === 'fc' && e.body.second) setTimeout(function () { doSync(true); }, 400);   // others may have counted too
       renderNotes();
     } else if (c === 'retry') {
+      if (e.kind === 'photo') {   // a picture the server keeps failing on (Drive full / blocked) is given up after a while: the count is saved, and it must not hold the page back for ever
+        if (res && (res.code === 'BUSY' || res.code === 'FAULT')) e.firstFail = e.firstFail || Date.now();   // only when the server actually answered; plain network loss never counts
+        if (e.firstFail && Date.now() - e.firstFail >= PHOTO_GIVEUP_MS) { L.qDrop(Q, e.rid); persistQ(); giveBack(e, 'ส่งไม่ได้นานเกินไป'); renderBadge(); pump(); return; }
+      }
       L.qRetry(Q, e.rid, Date.now()); persistQ();
     } else if (c === 'pin') {
       paused = true;
@@ -760,12 +1127,17 @@ if (typeof document !== 'undefined') (function () {
     if (reloadWhenEmpty && !Q.length) location.reload();   // another link was opened while saves were waiting: now they are all sent, start over with it
   }
   function giveBack(e, reason) {
+    if (e.kind === 'photo') { pstore.del(e.rid); notes.push({ id: e.rid, kind: 'err', text: 'ส่งรูปของ ' + e.body.code + ' ไม่สำเร็จ — ' + reason + ' ' + (e.body.countRid && Q.some(function (x) { return x.rid === e.body.countRid; }) ? '(จำนวนยังรอส่งอยู่)' : '(จำนวนบันทึกแล้ว)') + ' กรุณาแจ้งเจ้าของร้าน' }); renderNotes(); return; }
     var u = undoMap[e.rid]; delete undoMap[e.rid];
     if (e.kind === 'fc') {
+      refusedCounts[e.rid] = 1;
+      Q.filter(function (x) { return x.kind === 'photo' && x.body && x.body.countRid === e.rid; }).forEach(function (x) { L.qDrop(Q, x.rid); pstore.del(x.rid); });   // its count was refused: the photo of it is not sent
+      persistQ();
       if (u) L.revertSave(M, u);
       notes.push({ id: e.rid, kind: 'err', text: 'ไม่ได้บันทึก ' + e.label + ' — ' + reason + ' (คืนรายการแล้ว นับใหม่ได้)' });
     } else {
-      var why = L.dailyRefusal(reason, Date.now() - e.born);   // a photo refusal (too old, 10-minute rule) reads "รูปเก่าเกิน 10 นาที กรุณาถ่ายรูปใหม่"
+      var why = L.dailyRefusal(reason, Date.now() - e.born);
+      if (why.needPhoto && draft[e.body.id]) { draft[e.body.id].photo = null; draft[e.body.id].lastModified = 0; }   // a photo refusal (too old, 10-minute rule) reads "รูปเก่าเกิน 10 นาที กรุณาถ่ายรูปใหม่"
       if (u && u.daily) { u.daily.done = false; if (D) D.done = Math.max(0, (D.done || 1) - 1); prefill[e.body.id] = { answer: e.body.answer, foundAt: e.body.foundAt, err: why.text }; scrollNext = true; }
       notes.push({ id: e.rid, kind: 'err', text: 'ไม่ได้ส่ง ' + e.label + ' — ' + why.text + (why.needPhoto ? '' : ' (คืนรายการแล้ว กรอกและถ่ายรูปใหม่ได้)') });
     }
@@ -791,8 +1163,8 @@ if (typeof document !== 'undefined') (function () {
       var again = btn('tbtn', 'ลองเชื่อมต่อใหม่'); again.addEventListener('click', retryOnline);
       box.appendChild(noteBox('banner', 'wifi-off', 'ออฟไลน์ ดูรายการได้อย่างเดียว ยังบันทึกไม่ได้ จนกว่าจะเชื่อมต่อและระบบตรวจรหัสผ่าน', again));
     }
-    if (Q.length && L.qFailing(Q)) box.appendChild(noteBox('refused', 'triangle-alert', 'ส่งไม่สำเร็จ ระบบจะลองส่งซ้ำเอง กรุณาเปิดหน้านี้ค้างไว้จนกว่าจะส่งครบ' + (noStore ? ' (เครื่องนี้เก็บคิวไม่ได้ ถ้าปิดหน้านี้รายการจะหาย)' : '')));
-    else if (Q.length && noStore) box.appendChild(noteBox('banner', 'info', 'เครื่องนี้เก็บคิวไว้ไม่ได้ กรุณาเปิดหน้านี้ค้างไว้จนกว่า "กำลังส่ง" จะหมด'));
+    if (Q.length && L.qFailing(Q)) box.appendChild(noteBox('refused', 'triangle-alert', 'ส่งไม่สำเร็จ ระบบจะลองส่งซ้ำเอง กรุณาเปิดหน้านี้ค้างไว้จนกว่าจะส่งครบ' + (noStore || memOnlyPhotos() ? ' (เครื่องนี้เก็บคิวไม่ได้ ถ้าปิดหน้านี้รายการจะหาย)' : '')));
+    else if (Q.length && (noStore || memOnlyPhotos())) box.appendChild(noteBox('banner', 'info', 'เครื่องนี้เก็บคิวไว้ไม่ได้ กรุณาเปิดหน้านี้ค้างไว้จนกว่า "กำลังส่ง" จะหมด'));
     notes.forEach(function (n) {
       var x = btn('tbtn', 'ปิด');
       x.addEventListener('click', function () { notes = notes.filter(function (y) { return y !== n; }); renderNotes(); });
@@ -803,7 +1175,7 @@ if (typeof document !== 'undefined') (function () {
   /* ---------------- rendering: shell ---------------- */
   function render() {
     $('who').textContent = 'สวัสดี ' + who();
-    $('sub').textContent = L.headerSub(today(), !!M, (M || D || {}).loc);
+    $('sub').textContent = subText();
     renderLocBar();
     renderBadge(); renderNotes();
     $('fcHome').hidden = !M; $('dailyHome').hidden = !D;
@@ -815,7 +1187,7 @@ if (typeof document !== 'undefined') (function () {
     var bar = $('locBar'), src = M || D || {}, choices = L.locChoices(src.locs, src.loc), sel = $('locPick');
     if (!choices.length) { bar.hidden = true; return; }
     bar.hidden = false; clear(sel);
-    choices.forEach(function (n) { var o = el('option', '', n); o.value = n; if (n === src.loc) o.selected = true; sel.appendChild(o); });
+    choices.forEach(function (n) { var o = el('option', '', n); o.value = n; if (n === (switching() ? pickLoc : src.loc)) o.selected = true; sel.appendChild(o); });
   }
 
   /* ---------------- rendering: full count home ---------------- */
@@ -860,10 +1232,12 @@ if (typeof document !== 'undefined') (function () {
       if (!src.length) { box.appendChild(el('div', 'msg ok', M.secondMessage || 'ตอนนี้ไม่มีรายการให้คุณนับซ้ำ')); return; }
       box.appendChild(el('div', 'caption', 'ต้องนับซ้ำ: นับให้ตรงตามที่เห็นจริง (เรียงตามความสำคัญ)'));
     }
-    var f = L.filterItems(M, src, { q: ST.q, shelf: ST.shelf, showDone: ST.showDone, max: 150 });
+    // counted part+shelf rows (by anyone, or this phone's own saves) stay hidden in the plain "not counted yet" view, but show as green rows at the bottom of their shelf as soon as the person searches, picks a shelf or ticks "show counted"
+    var f = L.filterItems(M, src, { q: ST.q, shelf: ST.shelf, showDone: ST.showDone || (forced && !second), doneLast: !second, max: 150 });
+    var fCount = (forced && !ST.showDone && !second) ? L.filterItems(M, src, { q: ST.q, shelf: ST.shelf, showDone: false, max: 150 }) : f;
     if (!second) {
       $('uncLbl').textContent = ST.showDone ? 'ทุกรายการ' : 'ยังไม่ได้นับ';
-      $('uncCnt').textContent = fmt(f.rows.length + f.hidden);
+      $('uncCnt').textContent = fmt(fCount.rows.length + fCount.hidden);
       head.setAttribute('aria-expanded', open ? 'true' : 'false'); head.disabled = forced; head.setAttribute('aria-disabled', forced ? 'true' : 'false');
       $('vwrap').hidden = !open;
       panel.className = 'panel';
@@ -877,12 +1251,13 @@ if (typeof document !== 'undefined') (function () {
     if (!f.rows.length) box.appendChild(el('div', second ? 'msg ok' : 'empty', (ST.q.trim() || ST.shelf) ? 'ไม่มีรายการที่ตรงกับตัวกรอง' : (second ? 'ตอนนี้ไม่มีรายการให้คุณนับซ้ำ' : 'ไม่เหลือรายการที่ยังไม่ได้นับ')));
   }
   function rowOf(it) {
-    var part = M.parts[it.p], second = ST.tab === 'second', b = btn('prow lrow' + (it.done ? ' done' : ''));
+    var part = M.parts[it.p], second = ST.tab === 'second', b = btn('prow lrow' + (it.done ? ' done' : '') + (it.done && !second ? ' counted' : ''));
     var two = el('div', 'two'); two.appendChild(el('div', 'l1', part.name));
     var l2 = el('div', 'l2'); l2.appendChild(el('span', 'pn', part.code2));
     var sh = el('span', 'shelfchip'); sh.appendChild(ic('map-pin')); sh.appendChild(el('span', '', it.shelf)); l2.appendChild(sh);
     two.appendChild(l2);
-    if (it.done) two.appendChild(el('div', 'l3', 'นับแล้ว ' + it.on + ' · ' + it.by));
+    if (it.done && !second) two.appendChild(el('div', 'l3 cnt', '✓ นับแล้ว'));   // green row, bold label (no date / name on the row)
+    else if (it.done) two.appendChild(el('div', 'l3', 'นับแล้ว ' + it.on + ' · ' + it.by));
     b.appendChild(two);
     if (second) { var dot = el('span', 'dot'); dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', 'ต้องนับซ้ำ'); b.appendChild(dot); }
     else if (it.done) { var ck = ic('circle-check', 'chk'); ck.setAttribute('aria-hidden', 'false'); ck.setAttribute('role', 'img'); ck.setAttribute('aria-label', 'นับแล้ว'); b.appendChild(ck); }
@@ -896,6 +1271,7 @@ if (typeof document !== 'undefined') (function () {
 
   /* ---------------- part card ---------------- */
   function openCard(c, shelf, viaScan) {
+    if (switchBlocked()) return;
     card = c;
     card.shelf = shelf === undefined ? null : shelf; card.other = false;
     if (card.shelf === null && card.shelves.length === 1) card.shelf = card.shelves[0].shelf;
@@ -905,9 +1281,18 @@ if (typeof document !== 'undefined') (function () {
   }
   /** the card opens in type mode: put the cursor in the quantity box (iOS may refuse to open the keyboard - harmless) */
   function focusQty() { try { var q = $('qtyIn'); if (q && card && card.mode === 'type') q.focus(); } catch (e) { /* ignore */ } }
-  function openUnknown(code) { card = { unknown: true, ucode: code, qty: '', ushelf: '', err: '' }; showCard(); }
-  function showCard() { hideSug(); closeScan(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); syncLayer(); }
-  function backHome() { camStop(); card = null; $('card').hidden = true; $('home').hidden = false; if (M) { renderProg(); renderChips(); renderList(); } else if (D) renderDaily(); renderNotes(); syncLayer(); }
+  var KUD = T ? 'sc5.ud.' + T.t : '', udTried = false;
+  /** A small draft of the unknown-code card (code, quantity, shelf) in the tab session store (KUD): an Android tab reload while the camera app is open must not lose what was typed (the photo may be lost). */
+  function udSave() { if (!KUD || !card || !card.unknown) return; try { sessionStorage.setItem(KUD, JSON.stringify({ code: card.ucode, qty: card.qty, shelf: card.ushelf, loc: card.uloc || L.saveLoc(M, pickLoc) })); } catch (e) { /* ignore */ } }
+  function udClear() { try { if (KUD) sessionStorage.removeItem(KUD); } catch (e) { /* ignore */ } }
+  function udRestore() {
+    var d = null; try { d = KUD ? JSON.parse(sessionStorage.getItem(KUD) || 'null') : null; } catch (e) { d = null; }
+    if (!d || !d.code || card || !M) { if (d && !M) udClear(); return; }
+    card = { unknown: true, ucode: String(d.code), qty: String(d.qty === undefined ? '' : d.qty), ushelf: String(d.shelf || ''), uloc: String(d.loc || ''), err: 'ต้องถ่ายรูปสินค้าใหม่อีกครั้ง' }; showCard();
+  }
+  function openUnknown(code) { if (switchBlocked()) return; card = { unknown: true, ucode: code, qty: '', ushelf: '', err: '' }; udSave(); showCard(); }
+  function showCard() { hideSug(); closeScan(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); syncLayer(); drawInstall(); }
+  function backHome() { camStop(); card = null; udClear(); $('card').hidden = true; $('home').hidden = false; if (M) { renderProg(); renderChips(); renderList(); } else if (D) renderDaily(); renderNotes(); syncLayer(); geoFlush(); drawInstall(); }
   /* Android back button / back gesture: while the card or the scan sheet is open, one history entry (same URL, state object only) sits on top, so "back" closes that layer
      instead of leaving the app. Closing a layer by hand removes the entry again; the swallow flag ignores the popstate that this causes. */
   var layerPushed = false, layerSwallow = false;
@@ -957,6 +1342,7 @@ if (typeof document !== 'undefined') (function () {
     if (card.shelf === null) { drawShelfPicker(box); return; }
 
     if (!(card.ext && !needShelf())) {
+      if (!grp) grp = el('div', 'group');
       var chg = btn('item act'); chg.appendChild(el('span', 'grow', 'เปลี่ยนชั้นวาง'));
       chg.addEventListener('click', function () { card.shelf = null; card.other = false; card.qty = 0; card.lock = ''; card.warn = ''; drawCard(); });
       grp.appendChild(chg); box.appendChild(grp);
@@ -1042,7 +1428,7 @@ if (typeof document !== 'undefined') (function () {
     if (card.camMsg) {
       var lab = el('label', 'fbtn tint wide', ''); lab.style.marginTop = '10px'; lab.appendChild(ic('camera')); lab.appendChild(el('span', '', 'ถ่ายรูปบาร์โค้ด นับ 1 ชิ้น'));
       var f = el('input'); f.type = 'file'; f.accept = 'image/*'; f.setAttribute('capture', 'environment'); f.style.cssText = 'position:absolute;left:-9999px';
-      f.addEventListener('change', function () { var file = f.files && f.files[0]; f.value = ''; if (file) decodePhoto(file, function (text, why) { if (text && !L.isPlausibleCode(text)) pieceWarn(NOT_A_PART); else if (text) onPiece(text); else pieceWarn(why || 'อ่านบาร์โค้ดจากรูปไม่ได้'); }); });
+      f.addEventListener('change', function () { var file = f.files && f.files[0]; if (!file) { f.value = ''; return; } pieceWarn('กำลังอ่านบาร์โค้ดจากรูป…'); decodePhoto(file, function (text, why) { f.value = ''; var k = text ? L.readClass(text, M) : null; if (text && !(k && k.kind === 'plausible')) pieceWarn(/:\/\/|www\./i.test(text) ? NOT_A_PART : L.rejectMsg(text)); else if (text) onPiece(pieceRead(k)); else pieceWarn(why || 'อ่านบาร์โค้ดจากรูปไม่ได้'); }); });
       lab.appendChild(f); box.appendChild(lab);
     }
     var g = el('div', 'rowbtns');
@@ -1055,14 +1441,18 @@ if (typeof document !== 'undefined') (function () {
 
   function startPieceCamera() {
     var v = $('pieceVideo'); if (!v || card.camMsg) return;
-    var mine = card, hint = L.makeIgnoreHint(), hintEl = $('pieceHint');
+    var mine = card, hint = L.makeIgnoreHint(), hintEl = $('pieceHint'), rej = L.makeRejectNotes();
     camStart(v, function (text) {
-      var k = L.readClass(text), now = Date.now();
+      var k = L.readClass(text, M), now = Date.now();
       if (hintEl) hintEl.hidden = !hint.feed(k.kind, now);
-      // an implausible read (a QR link, junk) is just an empty frame: ignored silently, the piece gate keeps its own count of empty frames
-      if (cam.gate.feed(k.kind === 'plausible' ? text : '', now)) onPiece(text);
+      // an implausible read (a QR link, junk) is an empty frame for the piece gate (which keeps its own count of empty frames); the raw text is shown once
+      if (k.kind === 'ignored') { var rn = rej.note(text); if (rn && card === mine) pieceWarn(rn); }
+      var use = k.kind === 'plausible' ? pieceRead(k) : '';
+      if (cam.gate.feed(use, now)) onPiece(use);
     }, function (msg) { if (card === mine) { card.camMsg = msg; drawCard(); } }, { torch: $('pieceTorch'), zoom: $('pieceZoom'), frame: $('pieceVf') });
   }
+  /** the candidate of a read that belongs to this card (a quantity / lot suffix is cut off), else the first plausible one */
+  function pieceRead(k) { for (var i = 0; i < k.cands.length; i++) if (card && card.codes && card.codes.indexOf(L.normScan(k.cands[i])) >= 0) return k.cands[i]; return k.cands[0]; }
   /** one scan in "scan each piece" mode: the same code adds 1 (once it left the view for ~0.7 s); a different code warns and does not count */
   function onPiece(text) {
     if (!card || card.unknown || card.mode !== 'scan') return;
@@ -1072,23 +1462,42 @@ if (typeof document !== 'undefined') (function () {
   }
 
   /** A count at a branch needs no shelf name: the server uses the branch itself as the place (v7). The main shop still asks for one. */
-  function needShelf() { return !(M && M.loc && M.loc !== 'สนง.ใหญ่'); }
+  function needShelf() { var l = (card && card.unknown && card.uloc) || (M && M.loc); return !(l && l !== 'สนง.ใหญ่'); }
   function drawUnknown(box) {
     box.appendChild(el('h2', 'pname', 'ไม่พบรหัสนี้'));
     var m = el('div', 'msg err'); m.id = 'unknownMsg'; m.appendChild(document.createTextNode('อ่านได้: ')); m.appendChild(el('span', 'code', card.ucode)); m.appendChild(document.createTextNode(' — ไม่มีในรายการอะไหล่')); box.appendChild(m);
     box.appendChild(el('div', 'caption', 'บันทึกเป็นรหัสไม่รู้จัก เพื่อให้เจ้าของตรวจสอบ'));
     var c = el('div', 'panel fldstack');
-    var q = el('input'); q.type = 'number'; q.inputMode = 'numeric'; q.min = '0'; q.placeholder = '0'; q.value = card.qty; c.appendChild(ofield('uqty', 'จำนวนที่นับได้', q));
-    var s = el('input'); s.type = 'text'; s.maxLength = 40; s.placeholder = needShelf() ? 'เช่น A-05' : 'ไม่ต้องกรอกก็ได้'; s.value = card.ushelf; c.appendChild(ofield('ushelf', needShelf() ? 'ชื่อชั้นวาง' : 'ชื่อชั้นวาง (ถ้ามี)', s));
+    var q = el('input'); q.type = 'number'; q.inputMode = 'numeric'; q.min = '0'; q.placeholder = '0'; q.value = card.qty; q.addEventListener('input', function () { card.qty = q.value; udSave(); }); c.appendChild(ofield('uqty', 'จำนวนที่นับได้', q));
+    var s = el('input'); s.type = 'text'; s.maxLength = 40; s.placeholder = needShelf() ? 'เช่น A-05' : 'ไม่ต้องกรอกก็ได้'; s.value = card.ushelf; s.addEventListener('input', function () { card.ushelf = s.value.trim(); udSave(); }); c.appendChild(ofield('ushelf', needShelf() ? 'ชื่อชั้นวาง' : 'ชื่อชั้นวาง (ถ้ามี)', s));
     box.appendChild(c);
+    // a part that is not in DMS needs a photo of the product before it can be saved
+    var fld = el('div', 'field'); box.appendChild(fld);
+    var pick = el('label', 'fbtn tint wide', ''); pick.appendChild(ic('camera')); var pl = el('span', '', card.photo ? 'ถ่ายใหม่' : 'ถ่ายรูปสินค้า'); pick.appendChild(pl); fld.appendChild(pick);
+    var pf = el('input'); pf.type = 'file'; pf.id = 'uphoto'; pf.accept = 'image/*'; pf.setAttribute('capture', 'environment'); pf.style.position = 'absolute'; pf.style.left = '-9999px'; pick.appendChild(pf);
+    var prev = el('img', 'photo-prev'); prev.alt = ''; fld.appendChild(prev);
+    if (card.photo) { prev.src = card.photo; prev.style.display = 'block'; }
+    else fld.appendChild(el('div', 'hint', 'ต้องถ่ายรูปสินค้าก่อน จึงจะบันทึกได้'));
+    pf.addEventListener('change', function () {
+      var f = pf.files && pf.files[0]; if (!f) return;
+      card.qty = q.value; card.ushelf = s.value.trim();
+      var mine = card;
+      shrinkPhoto(f, function (data) {
+        if (card !== mine) return;
+        if (data) { card.photo = data; card.err = ''; } else card.err = 'อ่านรูปไม่ได้ ถ่ายรูปใหม่อีกครั้ง';
+        drawCard();
+      });
+    });
     if (card.err) { var e = el('div', 'msg err', card.err); e.setAttribute('role', 'alert'); box.appendChild(e); }
-    var b = btn('pbtn', 'บันทึกเป็นรหัสไม่รู้จัก'); b.id = 'unknownSave';
+    var b = btn('pbtn', 'บันทึกเป็นรหัสไม่รู้จัก'); b.id = 'unknownSave'; b.disabled = !card.photo;
     b.addEventListener('click', function () {
       card.qty = q.value; card.ushelf = s.value.trim();
-      if (card.qty === '' || (needShelf() && !card.ushelf) || isNaN(Number(card.qty)) || Number(card.qty) < 0) { card.err = needShelf() ? 'กรุณาใส่จำนวนและชื่อชั้นวาง' : 'กรุณาใส่จำนวนที่นับได้'; drawCard(); return; }
+      var bad = L.unknownCheck(card.qty, card.ushelf, needShelf(), card.photo);
+      if (bad) { card.err = bad; drawCard(); return; }
       if (!verified) { toast('ยังบันทึกไม่ได้ รอให้ระบบตรวจรหัสก่อน'); return; }
-      var code = card.ucode, shelf = card.ushelf, qty = card.qty;
-      enqueue('fc', L.unknownBody(code, shelf, qty, pickLoc), 'รหัสไม่รู้จัก ' + code);
+      var code = card.ucode, shelf = card.ushelf, qty = card.qty, photo = card.photo, loc = card.uloc || L.saveLoc(M, pickLoc);
+      var ce = enqueue('fc', L.unknownBody(code, shelf, qty, loc), 'รหัสไม่รู้จัก ' + code);
+      enqueuePhoto(code, shelf, qty, loc, photo, ce && ce.rid);
       toast('บันทึกแล้ว'); backHome();
     });
     box.appendChild(b);
@@ -1098,7 +1507,7 @@ if (typeof document !== 'undefined') (function () {
   function doSave(q) {
     if (!verified) { toast('ยังบันทึกไม่ได้ รอให้ระบบตรวจรหัสก่อน'); return; }
     if (q === null || q === '' || isNaN(Number(q)) || Number(q) < 0) { card.err = 'กรุณาใส่จำนวนที่นับได้ (ไม่พบเลยให้กด "ไม่พบเลย")'; drawCard(); return; }
-    var body = card.ext ? L.unknownBody(card.code2 || card.codes[0], card.shelf, q, pickLoc, card.mode) : L.fcBody(card, q, card.mode, pickLoc);   // a part from another location is saved exactly like an unknown code (the server stores the same row)
+    var body = card.ext ? L.unknownBody(card.code2 || card.codes[0], card.shelf, q, L.saveLoc(M, pickLoc), card.mode) : L.fcBody(card, q, card.mode, L.saveLoc(M, pickLoc));   // a part from another location is saved exactly like an unknown code (the server stores the same row)
     enqueue('fc', body, card.name + (card.shelf ? ' ชั้น ' + card.shelf : ''));
     toast('บันทึกแล้ว');
     backHome();
@@ -1106,22 +1515,45 @@ if (typeof document !== 'undefined') (function () {
 
   /* ---------------- scan overlay, typed code (local lookup: no server call) ---------------- */
   function homeMsg(t, kind) { var m = $('homeMsg'); clear(m); if (t) m.appendChild(el('div', 'msg ' + kind, t)); }
+  var scanSession = 0;   // bumped on every open / close of the scan sheet: a photo decode from an older session is dropped
   function openScan() {
+    if (switchBlocked()) return;
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
     homeMsg('', '');
-    $('scan').hidden = false; syncLayer(); $('scanNote').textContent = 'เล็งบาร์โค้ดให้อยู่ในกรอบ'; $('scanHint').hidden = true;
+    $('scan').hidden = false; syncLayer(); drawInstall(); $('scanNote').textContent = 'เล็งบาร์โค้ดให้อยู่ในกรอบ'; $('scanHint').hidden = true;
+    scanRej = L.makeRejectNotes(); photoUi('');
+    scanSession++;
+    if (photoDecoding) { photoUi('busy'); return; }   // an earlier photo is still being read: its result starts the camera again if nothing else did
+    startScanCam();
+  }
+  /** (re)starts the live camera of the open scan sheet; used on open, after the page was hidden, and after the photo picker closed */
+  function startScanCam() {
+    camStop();
+    if (photoDecoding) return;   // a photo is being read: the live camera must stay off until decodePhoto has called back
+    photoUi('');
     var hint = L.makeIgnoreHint(), confirm = L.makeConfirm();
     camStart($('scanVideo'), function (text) {
-      var k = L.readClass(text), now = Date.now();
+      var k = L.readClass(text, M), now = Date.now();
       $('scanHint').hidden = !hint.feed(k.kind, now);
-      if (k.kind !== 'plausible') return;                                   // empty or implausible (a QR link, junk): ignored silently, keep scanning
-      var p = L.findPart(M, text);
-      if (p >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(text, true); syncLayer(); return; }
-      if (confirm.add(k.n)) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(text, true); syncLayer(); }   // a plausible code that is not in the list: only after the same code was read twice in a row
+      if (k.kind === 'ignored') { var rn = scanRej.note(text); if (rn) $('scanNote').textContent = rn; return; }   // a read that is not a part code: say so once (raw text shown), keep scanning
+      if (k.kind !== 'plausible') return;                                   // empty
+      var code = bestRead(k);
+      if (L.findPart(M, code) >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(code, true); syncLayer(); return; }
+      if (confirm.add(L.normScan(code))) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(code, true); syncLayer(); }   // a plausible code that is not in the list: only after the same code was read twice in a row
     }, function (msg) { $('scanNote').textContent = msg; }, { torch: $('scanTorch'), zoom: $('scanZoom'), frame: $('scanVf'), onIdle: function () { $('scanNote').textContent = 'ถือห่างประมาณ 15-25 ซม. ให้บาร์โค้ดอยู่ในกรอบ หรือกดถ่ายรูปแทน'; } });
   }
-  function closeScan() { camStop(); $('scan').hidden = true; syncLayer(); }
+  var scanRej = L.makeRejectNotes();   // one rejected-read note per distinct raw value per scan session (reset when the sheet opens)
+  /** which candidate of a read to use: the first that is in the part list (so a lot / quantity suffix does not hide the part), else the first plausible one */
+  function bestRead(k) { for (var i = 0; i < k.cands.length; i++) if (M && L.findPart(M, k.cands[i]) >= 0) return k.cands[i]; return k.cands[0]; }
+  /** the photo part of the scan sheet: '' = nothing, 'busy' = reading (spinner), 'fail' = could not read (message + ถ่ายใหม่) */
+  function photoUi(mode) {
+    $('scanBusy').hidden = mode !== 'busy'; $('scanFail').hidden = mode !== 'fail'; $('scanFile').disabled = mode === 'busy';
+  }
+  var pickerOpen = false;   // the iOS/Android photo picker of the scan sheet is open (set on its click, cleared on change / cancel)
+  function resumeScanCam() { if (!$('scan').hidden && !document.hidden) startScanCam(); }
+  function closeScan() { scanSession++; camStop(); photoUi(''); $('scan').hidden = true; syncLayer(); geoFlush(); drawInstall(); }
   function lookup(code, viaScan) {
+    if (switchBlocked()) return;
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
     homeMsg('', '');
     var p = L.findPart(M, code);
@@ -1134,12 +1566,14 @@ if (typeof document !== 'undefined') (function () {
   function hideSug() { sugHint = false; $('codeIn').value = ''; clear($('codeSug')); clear($('codeSugLive')); $('codeIn').setAttribute('aria-expanded', 'false'); }
   /** a tapped suggestion: the card of THAT part (by index, not by re-reading its code), the same card lookup() builds */
   function openPart(p) {
+    if (switchBlocked()) return;
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }   // refused: the typed text and the list stay
     hideSug(); homeMsg('', '');
     openCard(L.cardOf(M, p, false), undefined, false);
   }
   /** the "not in the list" row / search with no exact match and no suggestions: the same unknown-code screen lookup() ends in */
   function openUnknownTyped(text) {
+    if (switchBlocked()) return;
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
     hideSug(); homeMsg('', '');
     openUnknown(text);
@@ -1177,6 +1611,7 @@ if (typeof document !== 'undefined') (function () {
   /** search / Enter: an exact code opens as always; anything else NEVER opens a part by itself - with suggestions the list stays (pick one or save as unknown), without any it is an unknown code */
   function goCode() {
     var v = $('codeIn').value; if (!v.trim()) return;
+    if (switchBlocked()) return;
     if (M && L.findPart(M, v) < 0 && L.isFullCode(v)) { openUnknownTyped(v.trim()); return; }   // a whole code that is not listed: like a scan of an unlisted product (refused while not verified: the text stays)
     if (M && L.findPart(M, v) < 0 && L.suggestMatches(M, v, 1).total > 0) { sugHint = true; renderSug(); return; }
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }   // refused: keep the typed text
@@ -1229,10 +1664,11 @@ if (typeof document !== 'undefined') (function () {
       if (!caps) return;
       var apply = function (c) { try { var r = track.applyConstraints({ advanced: [c] }); if (r && r.catch) r.catch(function () { /* not supported: fine */ }); return r; } catch (e) { return null; } };
       if (caps.focusMode && caps.focusMode.indexOf && caps.focusMode.indexOf('continuous') >= 0) apply({ focusMode: 'continuous' });
-      var zp = L.zoomPlan(caps);
+      var ios = isIOS(), zp = L.zoomPlan(caps, ios ? 1.75 : 2);   // iOS without a virtual lens: a bit of zoom so the phone can be held farther away; the triple / dual-wide cameras handle close focus themselves (no automatic zoom, the button still works)
       if (zp && zoomBtn) {
-        cam.zoom = zp.def; apply({ zoom: zp.def });
-        zoomBtn.hidden = false; zoomBtn.textContent = L.zoomLabel(zp.def);
+        var wideDef = camVirtual && caps.zoom && Number(caps.zoom.min) <= 1 && Number(caps.zoom.max) >= 2;   // iOS triple / dual-wide: min may be the ultra-wide lens, so start on the wide lens (2x)
+        var noAuto = ios && camVirtual && !wideDef; cam.zoom = noAuto ? zp.min : (wideDef ? 2 : zp.def); if (!noAuto) apply({ zoom: cam.zoom });
+        zoomBtn.hidden = false; zoomBtn.textContent = L.zoomLabel(cam.zoom);
         zoomBtn.onclick = function () { cam.zoom = cam.zoom > zp.min ? zp.min : zp.def; apply({ zoom: cam.zoom }); zoomBtn.textContent = L.zoomLabel(cam.zoom); };
       }
       if (torchBtn && caps.torch) {
@@ -1246,33 +1682,48 @@ if (typeof document !== 'undefined') (function () {
   }
   function engineSaved() { try { return L.engineSavedValid(localStorage.getItem('sc5.engine'), Date.now()) ? 'zx' : ''; } catch (e) { return ''; } }
   function engineSave() { try { localStorage.setItem('sc5.engine', 'zx:' + Date.now()); } catch (e) { /* ignore */ } }
-  var camThrows = 0, camDeviceId = '';   // consecutive native detect() failures; the camera chosen earlier in this page session
+  var camThrows = 0, camDeviceId = '', camVirtual = false;   // consecutive native detect() failures; the camera chosen earlier in this page session (+ whether it is an iOS triple / dual virtual lens)
+  var camBad = {};   // deviceIds whose exact open failed in this page session: never retried
   var camEngineSession = '';   // 'zxing' once the native detector proved useless in this page session
   var CAM_VIDEO = { width: { ideal: 1920 }, height: { ideal: 1080 } };
-  /** After permission: on Android multi-lens phones swap facingMode for the main back camera (labels are only readable after permission). Always resolves with a usable stream. */
+  function isIOS() { try { return L.isIOS(navigator.userAgent, navigator.platform, navigator.maxTouchPoints); } catch (e) { return false; } }
+  /** After permission: on Android multi-lens phones swap facingMode for the main back camera; on iPhone prefer "Back Triple Camera" / "Back Dual Wide Camera" / "Back Dual Camera" (they switch to the macro lens for close focus). Labels are only readable after permission. Always resolves with a usable stream; any error falls back to facingMode environment. */
   function betterStream(stream, run) {
     return new Promise(function (resolve) {
       try {
         var md = navigator.mediaDevices, tr = stream.getVideoTracks()[0], cur = '';
         try { cur = (tr && tr.getSettings && tr.getSettings().deviceId) || ''; } catch (e) { /* ignore */ }
-        var reopen = function (id) {
+        var reopen = function (id, virt) {
           stream.getTracks().forEach(function (t) { t.stop(); });
-          md.getUserMedia({ video: { deviceId: { exact: id }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).then(function (s2) { camDeviceId = id; resolve(s2); }, function () {
-            camDeviceId = '';
+          md.getUserMedia({ video: { deviceId: { exact: id }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).then(function (s2) { camDeviceId = id; camVirtual = !!virt; resolve(s2); }, function () {
+            camBad[id] = true; camDeviceId = ''; camVirtual = false;
             md.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).then(resolve, function () { resolve(null); });
           });
         };
-        if (camDeviceId) { if (camDeviceId === cur) resolve(stream); else reopen(camDeviceId); return; }   // chosen earlier in this session: no new enumeration
+        if (camDeviceId) { if (camDeviceId === cur) resolve(stream); else reopen(camDeviceId, camVirtual); return; }   // chosen earlier in this session: no new enumeration
         if (!md.enumerateDevices) { resolve(stream); return; }
         md.enumerateDevices().then(function (devs) {
-          var id = L.pickBackCamera(devs);
+          var id = L.pickBackCamera(devs), virt = false;
+          if (!id && isIOS()) { var pk = L.pickIosCamera(devs); if (pk) { id = pk.id; virt = pk.virtual; } }
           if (run !== camRun) { resolve(stream); return; }
-          if (id && id === cur) camDeviceId = id;
+          if (id && camBad[id]) id = '';   // an exact open of this camera failed before: keep the stream we have
+          if (id && id === cur) { camDeviceId = id; camVirtual = virt; }
           if (!id || id === cur) { resolve(stream); return; }
-          reopen(id);
+          reopen(id, virt);
         }, function () { resolve(stream); });
       } catch (e) { resolve(stream); }
     });
+  }
+  var viewCv = null;
+  /** Another view of the live video for ZXing: 'full' = the whole frame (shrunk to 960 px on the long edge), 'rot' = the central vertical strip turned 90 degrees (a barcode held sideways). Full resolution, one reused canvas. */
+  function viewCanvas(video, kind) {
+    var vw = video.videoWidth, vh = video.videoHeight, c = viewCv || (viewCv = document.createElement('canvas')), x;
+    try { x = c.getContext('2d', { willReadFrequently: true }); } catch (e) { x = c.getContext('2d'); }
+    if (kind === 'full') { var k = Math.min(1, L.LIVE_FULL_MAX / Math.max(vw, vh)), fw = Math.max(1, Math.round(vw * k)), fh = Math.max(1, Math.round(vh * k)); c.width = fw; c.height = fh; x.drawImage(video, 0, 0, vw, vh, 0, 0, fw, fh); return c; }   // never a full 1080x1920 decode: the whole-frame view is shrunk to 960 px
+    var sw = Math.max(1, Math.round(vw * 0.35)), sh = Math.max(1, Math.round(vh * 0.9)), sx = Math.round((vw - sw) / 2), sy = Math.round((vh - sh) / 2);
+    c.width = sh; c.height = sw; x.setTransform(1, 0, 0, 1, 0, 0);
+    x.translate(sh, 0); x.rotate(Math.PI / 2); x.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh); x.setTransform(1, 0, 0, 1, 0, 0);
+    return c;
   }
   /** Builds decode(canvas, cb): native BarcodeDetector when it really supports 1D formats, ZXing otherwise; falls over to ZXing when native throws or reads nothing for ~4 s. */
   function makeEngine(run, onReady, onNoLib) {
@@ -1284,15 +1735,24 @@ if (typeof document !== 'undefined') (function () {
         st.hints = st.hints || L.zxHints(window.ZXing, false); st.zx = true; cb && cb(true);
       });
     };
-    var zxRead = function (canvas) { return st.zx ? L.zxDecodeSource(window.ZXing, new window.ZXing.HTMLCanvasElementLuminanceSource(canvas), st.hints) : ''; };
-    var decode = function (canvas, cb) {
-      if (st.nativeBad || !st.det) { cb(zxRead(canvas)); return; }
+    // ZXing sees a different view on each frame: the centre band, the whole frame, the band inverted (white-on-black labels), a vertical strip rotated 90 degrees
+    var zxRead = function (canvas, video) {
+      if (!st.zx) return '';
+      var Z = window.ZXing, k = L.zxVariant(st.zxn++), c = canvas, inv = false;
+      try {
+        if (k === 'full' && video) c = viewCanvas(video, 'full'); else if (k === 'rot' && video) c = viewCanvas(video, 'rot'); else if (k === 'inv') inv = true;
+      } catch (e) { c = canvas; inv = false; }
+      return L.zxDecodeSource(Z, new Z.HTMLCanvasElementLuminanceSource(c), st.hints, inv);
+    };
+    st.zxn = 0;
+    var decode = function (canvas, cb, video) {
+      if (st.nativeBad || !st.det) { cb(zxRead(canvas, video)); return; }
       var after = function (t) {
         if (t) { st.nativeOk = true; cb(t); return; }
         if (!st.nativeOk && Date.now() - st.started > 4000) {   // native silent for 4 s: probe ZXing on every 3rd frame
           if (!st.zx) needZX();
           if (++st.frames % 3 === 0) {
-            var z = zxRead(canvas);
+            var z = zxRead(canvas, video);
             if (z) { if (++st.zxHits >= 2) { camEngineSession = 'zxing'; st.nativeBad = true; } cb(z); return; }
           }
         }
@@ -1321,7 +1781,12 @@ if (typeof document !== 'undefined') (function () {
     cam.gate = L.makeGate(700);
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nocam');
-      navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).then(function (first) {
+      var firstOpen = function () { return navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }); };
+      // the camera chosen earlier in this page session is opened directly (one open, not two: iOS shows the camera twice otherwise); on error fall back to facingMode
+      var firstP = (camDeviceId && !camBad[camDeviceId])
+        ? navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: camDeviceId }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).catch(function () { camBad[camDeviceId] = true; camDeviceId = ''; camVirtual = false; return firstOpen(); })
+        : firstOpen();
+      firstP.then(function (first) {
         if (run !== camRun) { first.getTracks().forEach(function (t) { t.stop(); }); return; }
         return betterStream(first, run).then(function (stream) {
           if (run !== camRun) { if (stream) stream.getTracks().forEach(function (t) { t.stop(); }); return; }
@@ -1356,33 +1821,67 @@ if (typeof document !== 'undefined') (function () {
         ctx.drawImage(video, r.sx, r.sy, r.sw, r.sh, 0, 0, r.sw, r.sh);
         var fin = false, finish = function (text) { if (fin) return; fin = true; if (run === camRun) { try { onFrame(text); } catch (e1) { /* ignore */ } } again(); };
         setTimeout(function () { finish(''); }, 2000);   // a decoder that never answers must not stall the loop
-        decode(canvas, finish);
+        decode(canvas, finish, video);
       } catch (e) { again(); }
     })();
   }
-  /** photo of a barcode -> text, decoded on the phone (cb(text) or cb('', thaiReason)). Here QR is allowed, and a 1D barcode wins when both are in the photo. */
+  var PHOTO_FAIL = 'อ่านบาร์โค้ดจากรูปไม่ได้ — ลองถ่ายใกล้ขึ้น หรือพิมพ์รหัส';
+  var photoDecoding = false;   // a photo is being decoded: nothing may start the live camera until decodePhoto has called back
+  /** photo of a barcode -> text, decoded on the phone. cb(text) or cb('', thaiReason) - called EXACTLY once, whatever happens (bad image, no memory, no library, 30 s timeout); photoDecoding is cleared right before that call.
+   *  Views come from L.photoViewPlan: centre band, tiles and the 2000 px whole picture at NATIVE detail, then turned / inverted, time-boxed (L.PHOTO_BUDGET_MS), yielding to the page between views. */
   function decodePhoto(file, cb) {
-    var url = URL.createObjectURL(file), img = new Image();
-    img.onload = function () {
-      try {
-        var s = Math.min(1, 1600 / Math.max(img.width, img.height)), c = document.createElement('canvas');
-        c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
-        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-        URL.revokeObjectURL(url);
-        var det = makeDetector(L.ONE_D_NATIVE.concat(['qr_code'])), viaZX = function () { photoZX(c, cb); };
-        if (det) det.detect(c).then(function (r) { var t = L.preferOneD(r); if (t) cb(t); else viaZX(); }, viaZX);
-        else viaZX();
-      } catch (e) { cb('', 'อ่านรูปไม่ได้ ถ่ายใหม่หรือพิมพ์รหัสแทน'); }
+    var done = false, url = '', timer = null, img = null;
+    photoDecoding = true;
+    var fin = function (t, why) {
+      if (done) return; done = true; clearTimeout(timer); photoDecoding = false;
+      if (img) { img.onload = img.onerror = null; }
+      if (url) { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } }
+      try { cb(t || '', t ? undefined : (why || PHOTO_FAIL)); } catch (e2) { /* the caller's problem; never rethrow into the event loop */ }
     };
-    img.onerror = function () { URL.revokeObjectURL(url); cb('', 'อ่านรูปไม่ได้ ถ่ายใหม่หรือพิมพ์รหัสแทน'); };
-    img.src = url;
+    try {
+      timer = setTimeout(function () { fin('', PHOTO_FAIL); }, 30000);
+      url = URL.createObjectURL(file); img = new Image();
+      img.onload = function () { try { photoViews(img, fin); } catch (e) { fin('', PHOTO_FAIL); } };
+      img.onerror = function () { fin('', PHOTO_FAIL); };
+      img.src = url;
+    } catch (e) { fin('', PHOTO_FAIL); }
   }
-  function photoZX(canvas, cb) {
+  /** draws one planned view of the picture onto a new canvas (rotated when asked) */
+  function photoCanvas(img, v) {
+    var c = document.createElement('canvas'), x;
+    c.width = v.rot ? v.dh : v.dw; c.height = v.rot ? v.dw : v.dh;
+    try { x = c.getContext('2d', { willReadFrequently: true }); } catch (e) { x = c.getContext('2d'); }
+    if (v.rot === 90) { x.translate(c.width, 0); x.rotate(Math.PI / 2); } else if (v.rot === 270) { x.translate(0, c.height); x.rotate(-Math.PI / 2); }
+    x.drawImage(img, v.sx, v.sy, v.sw, v.sh, 0, 0, v.dw, v.dh);
+    return c;
+  }
+  function photoViews(img, fin) {
+    var iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, t0 = Date.now();
+    var plan = L.photoViewPlan(iw, ih), det = makeDetector(L.ONE_D_NATIVE.concat(['qr_code'])), Z = null, i = 0;
+    var next = function () { setTimeout(step, 0); };
+    var release = function (c) { try { c.width = c.height = 0; } catch (e) { /* ignore */ } };
+    var qrPass = function () {
+      // no 1D barcode in any view: a QR (link) is better than nothing, so the caller can say "that is not a part code"
+      try {
+        var wv = plan.filter(function (v) { return v.tag === 'whole'; })[0] || plan[0], c = photoCanvas(img, wv), t = Z ? L.zxDecodeSource(Z, new Z.HTMLCanvasElementLuminanceSource(c), L.zxHints(Z, true)) : '';
+        release(c); fin(t, PHOTO_FAIL);
+      } catch (e) { fin('', PHOTO_FAIL); }
+    };
+    var step = function () {
+      if (i >= plan.length || Date.now() - t0 > L.PHOTO_BUDGET_MS) { qrPass(); return; }   // time-boxed: the view count alone is not a bound on a slow phone
+      var v = plan[i++], c;
+      try { c = photoCanvas(img, v); } catch (e) { next(); return; }
+      var viaZX = function () {
+        var t = '';
+        try { if (Z) t = L.zxDecodeSource(Z, new Z.HTMLCanvasElementLuminanceSource(c), L.zxHints(Z, false), v.inv); } catch (e) { t = ''; }
+        release(c); if (t) fin(t); else next();
+      };
+      if (det && !v.inv) { try { det.detect(c).then(function (r) { var t = L.preferOneD(r); if (t) { release(c); fin(t); } else viaZX(); }, viaZX); } catch (e) { viaZX(); } }
+      else viaZX();
+    };
     loadZXing(function (ok) {
-      if (!ok) { cb('', 'โหลดตัวอ่านบาร์โค้ดไม่ได้ (ตรวจอินเทอร์เน็ต) พิมพ์รหัสแทน'); return; }
-      var Z = window.ZXing, src = new Z.HTMLCanvasElementLuminanceSource(canvas);
-      var t = L.zxDecodeSource(Z, src, L.zxHints(Z, false)) || L.zxDecodeSource(Z, src, L.zxHints(Z, true));   // 1D first, QR only when there is no 1D barcode
-      if (t) cb(t); else cb('', 'อ่านบาร์โค้ดจากรูปไม่ได้ ถ่ายใหม่ให้ชัดขึ้น หรือพิมพ์รหัสแทน');
+      if (!ok) { fin('', 'โหลดตัวอ่านบาร์โค้ดไม่ได้ (ตรวจอินเทอร์เน็ต) พิมพ์รหัสแทน'); return; }
+      Z = window.ZXing; step();
     });
   }
   var NOT_A_PART = 'อ่านได้ แต่ไม่ใช่รหัสอะไหล่ (เช่น QR / ลิงก์) ถ่ายให้เห็นบาร์โค้ดแท่ง หรือพิมพ์รหัสแทน';
@@ -1421,8 +1920,32 @@ if (typeof document !== 'undefined') (function () {
     img.onerror = function () { URL.revokeObjectURL(url); cb(null); };
     img.src = url;
   }
+  /** Phone photo -> JPEG data URL, longest edge <= 1280 px, quality 0.7, made smaller step by step until about 250 KB. null when the picture cannot be read. */
+  function shrinkPhoto(file, cb) {
+    var url = null, img = new Image();
+    try { url = URL.createObjectURL(file); } catch (e) { cb(null); return; }
+    img.onload = function () {
+      var data = null;
+      try {
+        for (var i = 0; i < L.PHOTO_PLANS.length; i++) {
+          var pl = L.photoPlan(img.width, img.height, i), c = document.createElement('canvas');
+          c.width = pl.w; c.height = pl.h; c.getContext('2d').drawImage(img, 0, 0, pl.w, pl.h);
+          data = c.toDataURL('image/jpeg', pl.q);
+          if (data.length <= L.PHOTO_MAX_CHARS) break;
+        }
+      } catch (e) { data = null; }
+      if (typeof data !== 'string' || data.length < 1000 || data.indexOf('data:image/jpeg') !== 0) data = null;   // a blank or non-JPEG canvas result (some browsers return 'data:,' or a PNG) is a failure, never a photo
+      try { URL.revokeObjectURL(url); } catch (e2) { /* ignore */ }
+      cb(data);
+    };
+    img.onerror = function () { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } cb(null); };
+    img.src = url;
+  }
   function dailyCard(it) {
-    var c = el('div', 'card stack', ''), st = { photo: null, lastModified: 0 }, pf = prefill[it.id] || {};
+    var c = el('div', 'card stack', ''), pf = prefill[it.id] || {}, st = draft[it.id];
+    if (!st) { st = draft[it.id] = { photo: null, lastModified: 0, crates: '', per: '', loose: '', foundAt: '' };
+      if (pf.answer) { st.crates = String(pf.answer.crates || ''); st.per = String(pf.answer.perCrate || ''); st.loose = String(pf.answer.loose || (pf.answer.qty !== undefined ? pf.answer.qty : '')); }   // (an answer queued by the older page was a plain quantity)
+      st.foundAt = pf.foundAt || ''; }
     c.appendChild(el('h2', 'pname', it.name));
     c.appendChild(el('div', 'pcode', it.code2));
     var sh = el('div', 'shelfchip'); sh.style.maxWidth = '100%'; sh.style.height = 'auto'; sh.style.padding = '4px 10px'; sh.style.alignSelf = 'flex-start';
@@ -1438,22 +1961,23 @@ if (typeof document !== 'undefined') (function () {
       var of = el('div', 'of'); of.appendChild(el('label', '', d[0])); of.appendChild(i); g.appendChild(of);
       if (d[1] === 'crates') crates = i; else if (d[1] === 'per') per = i; else loose = i;
     });
-    if (pf.answer) { crates.value = pf.answer.crates || ''; per.value = pf.answer.perCrate || ''; loose.value = pf.answer.loose || (pf.answer.qty !== undefined ? pf.answer.qty : ''); }   // (an answer queued by the older page was a plain quantity)
+    crates.value = st.crates; per.value = st.per; loose.value = st.loose;
     total = el('div', 'total', 'รวม 0 ชิ้น'); c.appendChild(total);
     var recalc = function () { total.textContent = 'รวม ' + ((+crates.value || 0) * (+per.value || 0) + (+loose.value || 0)) + ' ชิ้น'; };
-    [crates, per, loose].forEach(function (i) { i.addEventListener('input', recalc); }); recalc();
+    [crates, per, loose].forEach(function (i) { i.addEventListener('input', function () { st.crates = crates.value; st.per = per.value; st.loose = loose.value; recalc(); }); }); recalc();
 
     var fld = el('div', 'field'); c.appendChild(fld);
     var pick = el('label', 'fbtn tint wide', ''); pick.appendChild(ic('camera')); var pl = el('span', '', 'ถ่ายรูป'); pick.appendChild(pl); fld.appendChild(pick);
     var file = el('input'); file.type = 'file'; file.accept = 'image/*'; file.setAttribute('capture', 'environment'); file.style.position = 'absolute'; file.style.left = '-9999px'; pick.appendChild(file);
     var prev = el('img', 'photo-prev'); prev.alt = ''; fld.appendChild(prev);
-    var foundAt = el('input'); foundAt.type = 'text'; foundAt.maxLength = 80; foundAt.value = pf.foundAt || '';
+    var foundAt = el('input'); foundAt.type = 'text'; foundAt.maxLength = 80; foundAt.value = st.foundAt; foundAt.addEventListener('input', function () { st.foundAt = foundAt.value; });
     foundAt.setAttribute('aria-label', 'เจอที่ไหนบ้าง');
     var fof = el('div', 'of'); fof.appendChild(foundAt); foundAt.placeholder = 'เจอที่ไหนบ้าง (จำเป็นถ้านับได้มากกว่า 0)'; c.appendChild(fof);
     var err = el('div', 'msg err'); err.hidden = true; c.appendChild(err);
     function showErr(t) { err.textContent = t; err.hidden = !t; }
     if (pf.err) showErr(pf.err);
     var send = btn('pbtn', 'ส่งรายการนี้'); c.appendChild(send);
+    if (st.photo) { prev.src = st.photo; prev.style.display = 'block'; pl.textContent = 'ถ่ายใหม่'; }
     function resetPhoto() { st.photo = null; st.lastModified = 0; prev.style.display = 'none'; pl.textContent = 'ถ่ายรูป'; file.value = ''; }
     file.addEventListener('change', function () {
       showErr('');
@@ -1481,19 +2005,28 @@ if (typeof document !== 'undefined') (function () {
 
   /* ---------------- events ---------------- */
   function wire() {
-    $('locPick').addEventListener('change', function () {   // v7: a roaming person goes to another location: a fresh list from the server for it
-      pickLoc = this.value; ST.tab = 'first'; ST.shelf = '';
-      if (card) backHome();
-      reboot();
-    });
+    $('locPick').addEventListener('change', function () { switchLoc(this.value, false); });   // v7: a roaming person goes to another location: a fresh list from the server for it
     $('scanBtn').addEventListener('click', openScan);
     $('scanClose').addEventListener('click', closeScan);
+    $('scanFile').addEventListener('click', function () { pickerOpen = true; camStop(); });   // iOS: the live camera must be off before the photo picker opens
+    $('scanFile').addEventListener('cancel', function () { pickerOpen = false; resumeScanCam(); });
     $('scanFile').addEventListener('change', function () {
-      var f = this.files && this.files[0]; this.value = '';
-      if (!f) return;
-      $('scanNote').textContent = 'กำลังอ่านรูป…';
-      decodePhoto(f, function (text, why) { if (text && !L.isPlausibleCode(text)) $('scanNote').textContent = NOT_A_PART; else if (text) { closeScan(); beep(); lookup(text, true); } else $('scanNote').textContent = why || 'อ่านบาร์โค้ดจากรูปไม่ได้'; });
+      var inp = this, f = inp.files && inp.files[0]; pickerOpen = false;
+      if (!f) { inp.value = ''; resumeScanCam(); return; }
+      if (photoDecoding) { inp.value = ''; $('scanNote').textContent = 'กำลังอ่านรูปก่อนหน้า…'; return; }   // one photo at a time
+      camStop(); photoUi('busy'); $('scanNote').textContent = 'เล็งบาร์โค้ดให้อยู่ในกรอบ';
+      var mySession = scanSession;
+      decodePhoto(f, function (text, why) {
+        inp.value = '';
+        if (mySession !== scanSession) { if (!$('scan').hidden && !document.hidden) { photoUi(''); startScanCam(); } return; }   // the sheet was closed / reopened while the picture was being read: drop the result
+        if ($('scan').hidden) return;
+        var k = text ? L.readClass(text, M) : null;
+        if (k && k.kind === 'plausible') { text = bestRead(k); photoUi(''); camStop(); $('scan').hidden = true; beep(); lookup(text, true); syncLayer(); }
+        else { photoUi('fail'); $('scanNote').textContent = text ? (/:\/\/|www\./i.test(text) ? NOT_A_PART : L.rejectMsg(text)) : (why || PHOTO_FAIL); }   // stay on the sheet: the live camera is NOT restarted under the message
+      });
     });
+    $('scanRetake').addEventListener('click', function () { $('scanFile').click(); });   // a new photo
+    $('scanLive').addEventListener('click', function () { startScanCam(); });             // the person chose the live camera again
     $('tabFirst').addEventListener('click', function () { ST.tab = 'first'; ST.shelf = ''; renderChips(); renderList(); });
     $('tabSecond').addEventListener('click', function () { ST.tab = 'second'; ST.shelf = ''; renderChips(); renderList(); });
     $('scanBackdrop').addEventListener('click', closeScan);   // same as the X button
@@ -1504,11 +2037,14 @@ if (typeof document !== 'undefined') (function () {
     $('shelfSel').addEventListener('change', function () { ST.shelf = this.value; renderList(); });
     $('q').addEventListener('input', function () { ST.q = this.value; renderList(); });
     $('showDone').addEventListener('change', function () { ST.showDone = this.checked; renderList(); });
-    $('refresh').addEventListener('click', function () { if (!card) doSync(true); else toast('บันทึกหรือกลับก่อน แล้วค่อยรีเฟรช'); });
+    $('refresh').addEventListener('click', function () { if (refreshBusy) return; if (!card) { refreshSpin(true); doSync(true); } else toast('บันทึกหรือกลับก่อน แล้วค่อยรีเฟรช'); });
     $('qbadge').addEventListener('click', function () { if (Q.length) { Q.forEach(function (e) { e.next = 0; }); pump(); toast('กำลังลองส่งใหม่'); } });
     // the camera must never stay on: closed with the scan sheet, and whenever the page is hidden or left
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) { camStop(); return; }
+      geoCheck();
+      if (!$('scan').hidden && pickerOpen) { pump(); setTimeout(function () { if (pickerOpen) { pickerOpen = false; resumeScanCam(); } }, 2500); return; }   // back from the photo picker: the picture's change event follows (do not restart the camera under the decode); if none comes (cancel not reported), restart anyway
+      if (!$('scan').hidden) { if ($('scanFail').hidden) startScanCam(); pump(); return; }   // the viewfinder went black while the page was hidden (not while a photo failure message waits for the person; startScanCam itself refuses while a photo is being read)
       if (card) { if (!card.unknown && card.mode === 'scan' && !card.camMsg && !card.locked) drawCard(); return; }
       if (verified && Date.now() - loadedAt > 60000) doSync(false);
       pump();
@@ -1518,11 +2054,11 @@ if (typeof document !== 'undefined') (function () {
     // another link opened in this tab (a shared phone): ALWAYS start over with it. If the waiting saves exist only in memory (no storage), nothing may be lost:
     // the app is hidden ("รอส่งข้อมูลให้เสร็จก่อน") until they are sent, then the page reloads.
     window.addEventListener('hashchange', function () {
-      if (noStore && Q.length) { reloadWhenEmpty = true; $('app').hidden = true; $('pad').hidden = true; $('xwarn').hidden = true; $('waitq').hidden = false; return; }
-      location.reload();
+      if ((noStore || memOnlyPhotos()) && Q.length) { reloadWhenEmpty = true; $('app').hidden = true; $('pad').hidden = true; $('xwarn').hidden = true; $('waitq').hidden = false; return; }
+      reloading = true; location.reload();
     });
     window.addEventListener('online', function () { Q.forEach(function (e) { e.next = 0; }); pump(); });
-    window.addEventListener('beforeunload', function (ev) { if (Q.length) { ev.preventDefault(); ev.returnValue = ''; return ''; } });
+    window.addEventListener('beforeunload', function (ev) { if (Q.length && !reloading) { ev.preventDefault(); ev.returnValue = ''; return ''; } });
   }
 
   /** Fonts load after the first paint (system fonts show at once, the web fonts swap in later); a failure just keeps the system fonts. */
@@ -1541,8 +2077,40 @@ if (typeof document !== 'undefined') (function () {
       new MutationObserver(sync).observe(sc, { attributes: true, attributeFilter: ['hidden'] }); sync();
     } catch (e) { /* no scroll lock: fine */ }
   }
+
+  /* ---- install button + help (never when already installed) ---- */
+  var installEvt = null, KHELP = 'sc5.helpx';
+  function isStandalone() { try { return !!((window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone); } catch (e) { return false; } }
+  function drawInstall() {
+    var ua = navigator.userAgent, box = $('installBox');
+    if (!box) return;
+    if (isStandalone() || !$('card').hidden || !$('scan').hidden) { box.hidden = true; return; }   // not over a part card / the scan sheet
+    var kind = L.installHelpKind(ua, !!installEvt), dismissed = store.get(KHELP) === '1';
+    $('installBtn').hidden = !installEvt;
+    $('installPerm').hidden = !(installEvt && L.showPermHint(ua));
+    $('installHelp').hidden = !(kind && !dismissed && !L.isLineBrowser(ua));   // LINE shows its own camera banner
+    if (kind) $('installHelpTxt').textContent = L.INSTALL_HELP[kind];
+    box.hidden = $('installBtn').hidden && $('installPerm').hidden && $('installHelp').hidden;
+  }
+  function wireInstall() {
+    window.addEventListener('beforeinstallprompt', function (e) { if (e.preventDefault) e.preventDefault(); installEvt = e; drawInstall(); });
+    window.addEventListener('appinstalled', function () { installEvt = null; drawInstall(); });
+    $('installBtn').addEventListener('click', function () {
+      var ev = installEvt; if (!ev || !ev.prompt) return;
+      try {
+        var p = ev.prompt();
+        Promise.resolve(ev.userChoice || p).then(function (c) { if (c && c.outcome === 'accepted') { installEvt = null; drawInstall(); } }, function () { /* fine */ });
+      } catch (e) { /* fine */ }
+    });
+    $('installHelpX').addEventListener('click', function () { store.set(KHELP, '1'); drawInstall(); });
+    try { if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { scope: './' }).catch(function () { /* the app works without it */ }); } catch (e) { /* fine */ }
+    drawInstall();
+  }
   function start() {
+    // LINE (Android) can hand the link to the real browser: try once; the query string stops a loop, the #hash is kept
+    try { if (L.isLineAndroid(navigator.userAgent) && typeof location.replace === 'function' && !/[?&]openExternalBrowser=/.test(String(location.href).split('#')[0])) { location.replace(location.pathname + '?openExternalBrowser=1' + location.hash); return; } } catch (e) { /* stay here */ }
     loadFonts(); watchSheet();
+    try { wireInstall(); } catch (e) { /* the app works without it */ }
     if (L.isLineBrowser(navigator.userAgent)) $('linebanner').hidden = false;   // LINE's in-app browser cannot use the camera
     if (!T) { $('nolink').textContent = 'เปิดแอปจากลิงก์ที่ได้รับครั้งแรก 1 ครั้ง แล้วจึงเพิ่มไปที่หน้าจอโฮม'; $('nolink').hidden = false; return; }
     buildKeys(); wire();
