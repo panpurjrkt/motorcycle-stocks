@@ -114,10 +114,20 @@ var StockLib = (function () {
     };
   };
 
+  /** ใครนับแล้วบ้าง: the board rows from the boot payload (names, places, item counts only), or null. */
+  L.cleanBoard = function (sb) {
+    if (!sb || !Array.isArray(sb.rows)) return null;
+    var me = sb.me && Number(sb.me.rank) > 0 ? { rank: Number(sb.me.rank), items: Number(sb.me.items) || 0 } : null;
+    return { rows: sb.rows.map(function (x) { return { rank: Number(x.rank) || 0, name: str(x.name), items: Number(x.items) || 0, placesText: str(x.placesText) }; }), me: me };
+  };
+  /** The person's own place on the board, as the server worked it out: {rank, items} or null when they have not counted yet. */
+  L.boardMe = function (sb) { return sb && sb.me ? { rank: sb.me.rank, items: sb.me.items } : null; };
+
   /* ---- the full-count model (from the boot payload: column arrays) ---- */
   L.makeModel = function (b) {
     var m = { mode: 'fullcount', v: str(b.v), counter: str(b.counter), dateText: str(b.dateText), state: str(b.state), message: str(b.message), secondMessage: str(b.secondMessage),
       loc: str(b.loc), locs: (b.locs || []).map(str),
+      sb: L.cleanBoard(b.sb),
       progress: copy(b.progress || { done: 0, total: 0, pct: 0, mine: 0, second: 0 }), parts: [], idIndex: Object.create(null), m2: Object.create(null), m1: Object.create(null),
       items: [], second: [], byPart: [], locked: Object.create(null), cards: Object.create(null), e2: Object.create(null), e1: Object.create(null), nOwn: 0 };
     var P = b.parts || {}, ids = P.id || [], i;
@@ -161,6 +171,20 @@ var StockLib = (function () {
     if (n in m.e1) return m.e1[n];
     return -1;
   };
+  /** Thai-made Yamaha labels: the label says BF6-E7632-00 but the barcode reads BF6E7632000 (11 chars). When the exact read is not a part, try: (1) padded with zeros to 12 chars (the DMS code1 form),
+   *  (2) an 11-12 char read whose tail after char 10 is all zeros cut to its first 10 chars (the code2 form without dashes). Only an exact hit of the list counts; two variants that hit DIFFERENT parts = ambiguous = -1.
+   *  Returns the part index or -1. An exact hit is NOT handled here (findPart does that first). */
+  L.findPartVariant = function (m, text) {
+    var n = L.normScan(text);
+    if (!n || !/^[A-Z0-9]+$/.test(n) || L.findPart(m, n) >= 0) return -1;
+    var hits = [], tryv = function (v) { var p = L.findPart(m, v); if (p >= 0 && hits.indexOf(p) < 0) hits.push(p); };
+    if (n.length >= 10 && n.length < 12) { var pad = n; while (pad.length < 12) pad += '0'; tryv(pad); }
+    if ((n.length === 11 || n.length === 12) && /^0+$/.test(n.slice(10))) tryv(n.slice(0, 10));   // only when everything dropped is zeros: 90793AT42220 (real part 90793-AT422-20) must never become 90793-AT422
+    return hits.length === 1 ? hits[0] : -1;
+  };
+  /** findPart, then the label-variant rule above */
+  L.findPartLoose = function (m, text) { var p = L.findPart(m, text); return p >= 0 ? p : L.findPartVariant(m, text); };
+
 
   /**
    * Suggestions while a code is typed. Returns { list, shown, total }: `list` = up to `max` (default 8) part indexes whose normalised code2 or code1 (part.codes, the data
@@ -272,8 +296,8 @@ var StockLib = (function () {
   };
   /** The queue body of a photo (the picture itself is kept apart, in IndexedDB / memory, under the entry's request id). */
   L.photoBody = function (code, shelf, qty, loc, countRid) { var b = { code: str(code), shelf: str(shelf), qty: String(qty) }; if (loc) b.loc = loc; if (countRid) b.countRid = str(countRid); return b; };
-  /** The body loc of a save: the place of the list the item came from (m.loc) when a place was picked, else '' (the server decides). */
-  L.saveLoc = function (m, pick) { return pick ? (str(m && m.loc) || pick) : ''; };
+  /** The body loc of a save: always the place of the list the item came from (m.loc), else the picked place; '' only when neither is known. The server accepts it only when it is the person's own place / a roaming pick. */
+  L.saveLoc = function (m, pick) { return str(m && m.loc) || str(pick); };
   /** '' when an unknown code may be saved, else the Thai reason: quantity / shelf as before, and now the photo of the product. */
   L.unknownCheck = function (qty, shelf, needShelf, photo) {
     if (qty === '' || (needShelf && !str(shelf).trim()) || isNaN(Number(qty)) || Number(qty) < 0) return needShelf ? 'กรุณาใส่จำนวนและชื่อชั้นวาง' : 'กรุณาใส่จำนวนที่นับได้';
@@ -350,16 +374,16 @@ var StockLib = (function () {
     if (p === undefined) return null;
     var want = body.otherShelf !== undefined && str(body.otherShelf).trim() ? body.otherShelf : body.shelf, list = body.second ? m.second : m.byPart[p], hit = null;
     for (var i = 0; i < list.length; i++) { if (list[i].p === p && sameShelf(list[i].shelf, want)) { hit = list[i]; break; } }
-    var undo = { item: hit, done: hit ? hit.done : false, on: hit ? hit.on : '', by: hit ? hit.by : '', progress: copy(m.progress), card: null };
+    var undo = { item: hit, done: hit ? hit.done : false, on: hit ? hit.on : '', by: hit ? hit.by : '', progress: copy(m.progress), dDone: 0, dMine: 0, card: null };
     if (body.second && m.cards[p]) {   // the blind card shows the shelf as counted too
       m.cards[p].forEach(function (s) { if (sameShelf(s.shelf, want)) { undo.card = { s: s, done: s.done, on: s.doneOn, by: s.doneBy }; s.done = true; s.doneOn = today; s.doneBy = who; } });
     }
     if (hit) {
       var mineAlready = hit.done && hit.by === who && hit.on === today;
-      if (!body.second && !hit.done) m.progress.done++;
-      if (!mineAlready) m.progress.mine++;
+      if (!body.second && !hit.done) { m.progress.done++; undo.dDone = 1; }
+      if (!mineAlready) { m.progress.mine++; undo.dMine = 1; }
       hit.done = true; hit.on = today; hit.by = who;
-    } else if (!body.second) { m.progress.mine++; }   // an extra (typed) shelf: counts as my work only
+    } else if (!body.second) { m.progress.mine++; undo.dMine = 1; }   // an extra (typed) shelf: counts as my work only
     if (body.second) m.progress.second = m.second.filter(function (x) { return !x.done; }).length;
     pct(m.progress);
     return undo;
@@ -369,19 +393,23 @@ var StockLib = (function () {
     if (undo.ext) { undo.ext.doneOn = undo.on; undo.ext.doneBy = undo.by; return; }
     if (undo.item) { undo.item.done = undo.done; undo.item.on = undo.on; undo.item.by = undo.by; }
     if (undo.card) { undo.card.s.done = undo.card.done; undo.card.s.doneOn = undo.card.on; undo.card.s.doneBy = undo.card.by; }
-    m.progress = copy(undo.progress);
+    if (undo.dDone === undefined) { m.progress = copy(undo.progress); return; }   // (an old-style record: whole snapshot)
+    m.progress.done = Math.max(0, m.progress.done - undo.dDone); m.progress.mine = Math.max(0, m.progress.mine - undo.dMine);   // only this save's own change: later queued saves keep theirs
+    if (m.second) m.progress.second = m.second.filter(function (x) { return !x.done; }).length;
+    pct(m.progress);
   };
   L.secondLeft = function (m) { return m.second.filter(function (x) { return !x.done; }).length; };
 
   /* ---- the save queue (a plain array, oldest first; one request in flight at a time so saves keep their order) ---- */
   var BACKOFF = [1500, 3000, 6000, 12000, 24000, 48000, 60000];
+  L.GIVEUP_MS = 30 * 60 * 1000;   // a count/photo the server keeps answering FAULT/BUSY is given back after this long
   L.backoffMs = function (tries) { return BACKOFF[Math.min(Math.max(tries, 1), BACKOFF.length) - 1]; };
   /** tok = the link token the save was made under: it is sent with THIS token, never with another person's */
   L.newEntry = function (kind, rid, body, label, now, tok) { return { rid: rid, kind: kind, body: body, label: str(label), tries: 0, next: 0, born: now || 0, tok: str(tok) }; };
   L.qAdd = function (q, e) { q.push(e); return q; };
   /** The entry to send now (the oldest, when its retry time has come) or null. */
   L.qDue = function (q, now) {   // (a photo that waits for its retry never holds back the counts behind it; counts keep their order)
-    for (var i = 0; i < q.length; i++) { if (q[i].next <= now) return q[i]; if (q[i].kind !== 'photo') return null; }
+    for (var i = 0; i < q.length; i++) { if (q[i].next <= now) return q[i]; if (q[i].kind !== 'photo' && !(q[i].lastFault && q[i].firstFail && now - q[i].firstFail >= L.GIVEUP_MS)) return null; }
     return null;
   };
   L.qNextAt = function (q) { var m = Infinity; q.forEach(function (e) { if (e.next < m) m = e.next; }); return m; };
@@ -407,7 +435,7 @@ var StockLib = (function () {
     try { a = JSON.parse(text); } catch (e) { a = null; }
     if (!Array.isArray(a)) return [];
     return a.filter(function (e) { return e && typeof e === 'object' && typeof e.rid === 'string' && (e.kind === 'fc' || e.kind === 'daily' || e.kind === 'photo') && e.body && typeof e.body === 'object' && (token === undefined || !e.tok || e.tok === token); })
-      .map(function (e) { var o = { rid: e.rid, kind: e.kind, body: e.body, label: str(e.label), tries: 0, next: 0, born: Number(e.born) || 0, tok: str(e.tok) || str(token) }; if (e.lostPhoto) o.lostPhoto = true; return o; });
+      .map(function (e) { var o = { rid: e.rid, kind: e.kind, body: e.body, label: str(e.label), tries: 0, next: 0, born: Number(e.born) || 0, tok: str(e.tok) || str(token) }; if (e.lostPhoto) o.lostPhoto = true; if (Number(e.firstFail) > 0) o.firstFail = Number(e.firstFail); if (e.lastFault === true) o.lastFault = true; return o; });
   };
 
   /* ---- camera: when does the SAME barcode count again? ---- */
@@ -510,7 +538,7 @@ var StockLib = (function () {
    *  Returns {id, virtual: true} or null (keep facingMode environment). */
   L.pickIosCamera = function (devices) {
     var pats = [/back triple camera/i, /back dual wide camera/i, /back dual camera/i], list = (devices || []).filter(function (d) { return d && d.kind === 'videoinput' && d.deviceId; });
-    for (var i = 0; i < pats.length; i++) for (var j = 0; j < list.length; j++) if (pats[i].test(String(list[j].label || ''))) return { id: list[j].deviceId, virtual: true };
+    for (var i = 0; i < pats.length; i++) for (var j = 0; j < list.length; j++) if (pats[i].test(String(list[j].label || ''))) return { id: list[j].deviceId, virtual: true, wide: i < 2 };   // wide: Triple / Dual Wide start on the wide lens (2x); plain Dual (wide + tele, no macro) must not get the 2x default: it lands on the telephoto
     return null;
   };
   /** A saved engine note ('zx:<ms>') is valid for 7 days; anything else (old 'zx', junk, expired) is ignored. */
@@ -519,10 +547,37 @@ var StockLib = (function () {
     var age = now - parseInt(m[1], 10); return age >= 0 && age < 7 * 86400000;
   };
   /** A native BarcodeDetector answer ([{rawValue, format}]) -> the first 1D read ('' when there is only a QR or nothing) */
-  L.pickLive = function (results) {
-    var r = (results || []).filter(function (x) { return x && x.rawValue && L.ONE_D_NATIVE.indexOf(x.format) >= 0; })[0];
-    return r ? str(r.rawValue) : '';
+  L.pickLive = function (results, m, opt) {
+    opt = opt || {};
+    var rs = (results || []).filter(function (x) { return x && x.rawValue && L.ONE_D_NATIVE.indexOf(x.format) >= 0; });
+    if (!rs.length) return '';
+    if (rs.length > 1) {   // several barcodes in one frame
+      var prefer = opt.prefer || [];   // the open card's own codes (normalised): they win
+      for (var q = 0; q < rs.length; q++) if (prefer.indexOf(L.normScan(rs[q].rawValue)) >= 0) return str(rs[q].rawValue);
+      if (m && prefer.length) for (var q2 = 0; q2 < rs.length; q2++) {   // a variant label of the open card's part
+        var pi = L.findPartLoose(m, rs[q2].rawValue), pp = pi >= 0 ? m.parts[pi] : null;
+        if (pp && [pp.code2, pp.c1, pp.code1].some(function (c) { return c && prefer.indexOf(L.normScan(c)) >= 0; })) return str(rs[q2].rawValue);
+      }
+      var pool = rs;
+      if (m) { var hits = rs.filter(function (x) { return L.findPartLoose(m, x.rawValue) >= 0; }); if (hits.length) pool = hits; }
+      if (opt.cx !== undefined && opt.cy !== undefined && pool.length > 1 && pool.every(function (x) { return x.boundingBox; })) {   // nearest to the frame centre
+        var bd = function (x) { var b = x.boundingBox; return Math.pow(b.x + b.width / 2 - opt.cx, 2) + Math.pow(b.y + b.height / 2 - opt.cy, 2); };
+        var nb = pool[0]; pool.forEach(function (x) { if (bd(x) < bd(nb)) nb = x; });
+        return str(nb.rawValue);
+      }
+      if (pool !== rs) return str(pool[0].rawValue);
+      var best = rs[0], bl = -1;   // none is a part: the longest plausible one
+      rs.forEach(function (x) { var l = L.isPlausibleCode(x.rawValue) ? L.normScan(x.rawValue).length : 0; if (l > bl) { best = x; bl = l; } });
+      return str(best.rawValue);
+    }
+    return str(rs[0].rawValue);
   };
+  /** The views whose reads are NOT trusted on one sighting (they see neighbours / other labels): the find-scan sheet wants them twice. */
+  L.isWideView = function (v) { return v === 'full' || v === 'strip' || v === 'rot'; };
+  /** The native view for live frame n; centreOnly (piece counting) = always the centre band. */
+  L.nativeViewFor = function (n, centreOnly) { return centreOnly ? 'band' : L.nativeView(n); };
+  /** Which view the native detector gets on live frame n: the centre band (2 of 4), the WHOLE frame at native size, a wide short centre strip (full width, 20% height) at native size. */
+  L.nativeView = function (n) { return ['band', 'full', 'band', 'strip'][((n % 4) + 4) % 4]; };
   /** Photo path: when a photo holds both a 1D barcode and a QR, the 1D one wins; a QR alone is still returned. */
   L.preferOneD = function (results) {
     var all = (results || []).filter(function (x) { return x && x.rawValue; });
@@ -530,6 +585,8 @@ var StockLib = (function () {
     return one ? str(one.rawValue) : '';
   };
   /** A read that can be a part code: no link, and after normScan only A-Z / 0-9, 5 to 20 characters (real DMS codes are at most 14, the longest is SUN4281061435T; the rest is slack for odd labels). */
+  /** A camera open error that will not go away by itself (this camera cannot be used): only these mark a camera bad for the session. */
+  L.camHardFail = function (err) { var n = err && err.name; return n === 'OverconstrainedError' || n === 'NotFoundError'; };
   L.isPlausibleCode = function (text) {
     var raw = str(text);
     if (/:\/\/|www\./i.test(raw)) return false;
@@ -543,6 +600,8 @@ var StockLib = (function () {
     var first = raw.replace(/^[\s'\u2018\u2019\u02bc`]+/, '').split(/[\/+.\s]/)[0];
     // the prefix is only used when it is an exact part of the list (m = the loaded list): a prefix-only read never makes an unknown card, unknown cards come from the raw read
     if (first && m && L.isPlausibleCode(first) && L.findPart(m, first) >= 0 && (!out.length || L.normScan(first) !== L.normScan(raw))) out.push(first);
+    // label variant (BF6-E7632-00 printed, BF6E7632000 in the barcode): the matching part's own code is added after the raw read; the raw read stays first (an unknown card uses it)
+    if (m && L.isPlausibleCode(raw) && L.findPart(m, raw) < 0) { var vp = L.findPartVariant(m, raw); if (vp >= 0) out.push(m.parts[vp].code2 || m.parts[vp].c1); }
     return out;
   };
   /** The short Thai note for a read that is not a part code (the raw text is shown, cut at 40 characters); '' for nothing. */
@@ -734,7 +793,8 @@ if (typeof document !== 'undefined') (function () {
       cb(res);
     }
     try {
-      if (typeof AbortController !== 'undefined') { ctl = new AbortController(); to = setTimeout(function () { try { ctl.abort(); } catch (e) { /* ignore */ } }, timeoutMs || 30000); }
+      if (typeof AbortController !== 'undefined') ctl = new AbortController();
+      to = setTimeout(function () { try { if (ctl) ctl.abort(); } catch (e) { /* ignore */ } fin(NET); }, timeoutMs || 30000);   // (always a timer: without AbortController the fetch cannot be cancelled, but the caller is released)
       window.fetch(EXEC, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body), redirect: 'follow', credentials: 'omit', cache: 'no-store', signal: ctl ? ctl.signal : undefined })
         .then(function (r) { return r.text(); })
         .then(function (t) { fin(L.parseResponse(t)); }, function () { fin(NET); });
@@ -943,7 +1003,7 @@ if (typeof document !== 'undefined') (function () {
     return false;
   }
   function overlay(e) {   // a queued (not yet confirmed) save shows as done
-    if (e.kind === 'fc' && M) { var u = L.applySave(M, e.body, M.counter, M.dateText); if (u) undoMap[e.rid] = u; }
+    if (e.kind === 'fc' && M && (!e.body.loc || !M.loc || e.body.loc === M.loc)) { var u = L.applySave(M, e.body, M.counter, M.dateText); if (u) undoMap[e.rid] = u; }
     if (e.kind === 'daily' && D && D.items) D.items.forEach(function (it) { if (it.id === e.body.id && !it.done) { it.done = true; D.done = (D.done || 0) + 1; undoMap[e.rid] = { daily: it }; } });
   }
   var rebootTimer = null, rebootGen = 0;
@@ -972,17 +1032,17 @@ if (typeof document !== 'undefined') (function () {
     var b = $('refresh'); if (b) { b.classList.toggle('spin', !!on); b.setAttribute('aria-busy', on ? 'true' : 'false'); }
     if (on) refreshTimer = setTimeout(function () { refreshSpin(false); }, 30000);   // never spin forever
   }
-  function doSync(manual) {
-    if (!verified || document.hidden || card || inflight || L.syncHeld(Q, manual)) { if (manual) refreshSpin(false); schedSync(); return; }   // (a waiting picture does not hold the list back)
+  function doSync(manual, quiet) {
+    if (!verified || document.hidden || card || inflight || L.syncHeld(Q, manual)) { if (manual) { refreshSpin(false); if (!quiet) toast('กำลังส่งข้อมูล รอสักครู่'); } schedSync(); return; }   // (a waiting picture does not hold the list back)
     api('sync', { v: M ? M.v : '' }, function (res) {
       var c = L.classify(res);
       if (manual) refreshSpin(false);
       if (c === 'ok') {
-        if (res.same) { loadedAt = Date.now(); if (manual) toast('อัปเดตแล้ว'); }
-        else if (!card) { if (D && editingDaily()) { acceptBoot(res, false, true); } else acceptBoot(res, false); if (manual) toast('อัปเดตแล้ว'); }   // a half-typed daily card: take the data, draw it later
+        if (res.same) { loadedAt = Date.now(); if (manual && !quiet) toast('อัปเดตแล้ว'); }
+        else if (!card) { if (D && editingDaily()) { acceptBoot(res, false, true); } else acceptBoot(res, false); if (manual && !quiet) toast('อัปเดตแล้ว'); }   // a half-typed daily card: take the data, draw it later
       }
       else if (c === 'pin') { showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN'); return; }
-      else if (manual) toast(res.error || NET.error);
+      else if (manual && !quiet) toast(res.error || NET.error);
       schedSync();
     });
   }
@@ -1050,7 +1110,7 @@ if (typeof document !== 'undefined') (function () {
   pstore.onFlushed = function () { renderNotes(); };
   function memOnlyPhotos() { return Q.some(function (e) { return e.kind === 'photo'; }) && !pstore.durable(); }
   /** The photo goes as its OWN request after the count (a slow or failed photo never holds the count back); it is queued only once the picture is stored. */
-  var refusedCounts = Object.create(null), photoErrs = Object.create(null), PHOTO_ERR_MS = 5 * 60 * 1000, PHOTO_GIVEUP_MS = 30 * 60 * 1000;   // refused count rids; when each waiting picture's storage first answered 'err' (in a row)
+  var refusedCounts = Object.create(null), photoErrs = Object.create(null), PHOTO_ERR_MS = 5 * 60 * 1000;   // refused count rids; when each waiting picture's storage first answered 'err' (in a row)
   function enqueuePhoto(code, shelf, qty, loc, data, countRid) {
     var rid = L.makeRid(window.crypto, Math.random), tok = T.t;
     if (countRid && refusedCounts[countRid]) return;   // its count was already refused: no picture to send
@@ -1105,15 +1165,15 @@ if (typeof document !== 'undefined') (function () {
       if (e.kind === 'photo') pstore.del(e.rid);
       if (e.kind === 'fc') delete locCache[e.body.loc || (M || {}).loc];   // a save here: that place's remembered list is no longer true
       if (e.kind === 'daily') { delete draft[e.body.id]; if (redrawLater && D && !card && !editingDaily()) { redrawLater = false; renderDaily(); } }
-      if (e.kind === 'fc' && M && res.progress && !Q.length) { M.progress.done = res.progress.done; M.progress.total = res.progress.total; M.progress.pct = res.progress.pct; M.progress.mine = res.progress.mine; if (!card && !$('app').hidden) renderProg(); }
+      if (e.kind === 'fc' && M && res.progress && (!e.body.loc || !M.loc || e.body.loc === M.loc) && !Q.some(function (x) { return x.kind === 'fc' && (!x.body.loc || !M.loc || x.body.loc === M.loc); })) { M.progress.done = res.progress.done; M.progress.total = res.progress.total; M.progress.pct = res.progress.pct; M.progress.mine = res.progress.mine; if (!card && !$('app').hidden) renderProg(); }
       if (res.replacedOther) notes.push({ id: e.rid, kind: 'info', text: 'แทนที่การนับของ ' + res.replacedOther + ' วันนี้' });
-      if (e.kind === 'fc' && e.body.second) setTimeout(function () { doSync(true); }, 400);   // others may have counted too
+      if (e.kind === 'fc' && e.body.second) setTimeout(function () { doSync(true, true); }, 400);   // others may have counted too
       renderNotes();
     } else if (c === 'retry') {
-      if (e.kind === 'photo') {   // a picture the server keeps failing on (Drive full / blocked) is given up after a while: the count is saved, and it must not hold the page back for ever
-        if (res && (res.code === 'BUSY' || res.code === 'FAULT')) e.firstFail = e.firstFail || Date.now();   // only when the server actually answered; plain network loss never counts
-        if (e.firstFail && Date.now() - e.firstFail >= PHOTO_GIVEUP_MS) { L.qDrop(Q, e.rid); persistQ(); giveBack(e, 'ส่งไม่ได้นานเกินไป'); renderBadge(); pump(); return; }
-      }
+      // a picture / count the server keeps failing on (Drive full / blocked / a FAULT every time) is given up after a while; only when THIS reply is itself a fault (a network loss or a busy count never gives back)
+      var fault = !!(res && (res.code === 'FAULT' || (e.kind === 'photo' && res.code === 'BUSY')));
+      if (fault) { e.firstFail = e.firstFail || Date.now(); e.lastFault = true; } else e.lastFault = false;
+      if (fault && Date.now() - e.firstFail >= L.GIVEUP_MS) { L.qDrop(Q, e.rid); persistQ(); giveBack(e, 'ส่งไม่ได้นานเกินไป'); renderBadge(); pump(); if (reloadWhenEmpty && !Q.length) location.reload(); return; }
       L.qRetry(Q, e.rid, Date.now()); persistQ();
     } else if (c === 'pin') {
       paused = true;
@@ -1191,8 +1251,32 @@ if (typeof document !== 'undefined') (function () {
   }
 
   /* ---------------- rendering: full count home ---------------- */
+  var sbOpen = false;
+  /** ใครนับแล้วบ้าง: collapsed = the person's own rank and item count; expanded = the whole list with their own row highlighted. Full-count home only. */
+  function renderSb() {
+    var box = $('sb'); clear(box);
+    if (!M || M.state !== 'open' || !M.sb || !M.sb.rows.length) { box.hidden = true; return; }
+    box.hidden = false;
+    var me = L.boardMe(M.sb), h = btn('sbhead'), tx = el('div', 'tx');
+    tx.appendChild(el('div', 't1', 'ใครนับแล้วบ้าง'));
+    tx.appendChild(el('div', 't2', me ? 'คุณอันดับ ' + me.rank + ' · นับแล้ว ' + fmt(me.items) + ' อย่าง' : 'ยังไม่ได้เริ่มนับ'));
+    h.appendChild(tx); h.appendChild(el('span', 'tg', sbOpen ? 'ซ่อน' : 'ดูทั้งหมด'));
+    h.setAttribute('aria-expanded', sbOpen ? 'true' : 'false');
+    h.addEventListener('click', function () { sbOpen = !sbOpen; renderSb(); });
+    box.appendChild(h);
+    if (!sbOpen) return;
+    var list = el('div', 'sbrows'), MEDAL = ['🥇', '🥈', '🥉'];
+    M.sb.rows.forEach(function (x, i) {
+      var mine = !!me && x.rank === me.rank, row = el('div', 'sbrow' + (mine ? ' me' : '')), nm = el('div', 'nm', x.name + (mine ? ' (คุณ)' : '')), ct = el('div', 'ct', fmt(x.items));
+      row.appendChild(el('div', 'rk', i < 3 ? MEDAL[i] : String(x.rank)));
+      nm.appendChild(el('span', 'pl', x.placesText));
+      ct.appendChild(el('small', '', ' อย่าง'));
+      row.appendChild(nm); row.appendChild(ct); list.appendChild(row);
+    });
+    box.appendChild(list);
+  }
   function renderFc() {
-    renderProg();
+    renderProg(); renderSb();
     $('prog').hidden = false;
     if (M.state !== 'open') { var b = $('blocked'); b.textContent = M.message || 'ยังนับไม่ได้'; b.hidden = false; $('tools').hidden = true; return; }
     $('blocked').hidden = true; $('tools').hidden = false;
@@ -1428,7 +1512,7 @@ if (typeof document !== 'undefined') (function () {
     if (card.camMsg) {
       var lab = el('label', 'fbtn tint wide', ''); lab.style.marginTop = '10px'; lab.appendChild(ic('camera')); lab.appendChild(el('span', '', 'ถ่ายรูปบาร์โค้ด นับ 1 ชิ้น'));
       var f = el('input'); f.type = 'file'; f.accept = 'image/*'; f.setAttribute('capture', 'environment'); f.style.cssText = 'position:absolute;left:-9999px';
-      f.addEventListener('change', function () { var file = f.files && f.files[0]; if (!file) { f.value = ''; return; } pieceWarn('กำลังอ่านบาร์โค้ดจากรูป…'); decodePhoto(file, function (text, why) { f.value = ''; var k = text ? L.readClass(text, M) : null; if (text && !(k && k.kind === 'plausible')) pieceWarn(/:\/\/|www\./i.test(text) ? NOT_A_PART : L.rejectMsg(text)); else if (text) onPiece(pieceRead(k)); else pieceWarn(why || 'อ่านบาร์โค้ดจากรูปไม่ได้'); }); });
+      f.addEventListener('change', function () { var file = f.files && f.files[0]; if (!file) { f.value = ''; return; } if (photoDecoding) { f.value = ''; pieceWarn('กำลังอ่านรูปก่อนหน้า…'); return; } pieceWarn('กำลังอ่านบาร์โค้ดจากรูป…'); f.disabled = true; var mineCard = card; decodePhoto(file, function (text, why) { f.value = ''; f.disabled = false; if (card !== mineCard) return; var k = text ? L.readClass(text, M) : null; if (text && !(k && k.kind === 'plausible')) pieceWarn(/:\/\/|www\./i.test(text) ? NOT_A_PART : L.rejectMsg(text)); else if (text) onPiece(pieceRead(k)); else pieceWarn(why || 'อ่านบาร์โค้ดจากรูปไม่ได้'); }); });
       lab.appendChild(f); box.appendChild(lab);
     }
     var g = el('div', 'rowbtns');
@@ -1442,6 +1526,7 @@ if (typeof document !== 'undefined') (function () {
   function startPieceCamera() {
     var v = $('pieceVideo'); if (!v || card.camMsg) return;
     var mine = card, hint = L.makeIgnoreHint(), hintEl = $('pieceHint'), rej = L.makeRejectNotes();
+    if (!card.gate) card.gate = L.makeGate(700); else { card.gate.lastCb = 0; card.gate.empties = 0; card.gate.lastSeen = Date.now(); }   // kept across camera restarts: the barcode still in view counts as just seen, and the pause is not a slow callback
     camStart(v, function (text) {
       var k = L.readClass(text, M), now = Date.now();
       if (hintEl) hintEl.hidden = !hint.feed(k.kind, now);
@@ -1449,7 +1534,7 @@ if (typeof document !== 'undefined') (function () {
       if (k.kind === 'ignored') { var rn = rej.note(text); if (rn && card === mine) pieceWarn(rn); }
       var use = k.kind === 'plausible' ? pieceRead(k) : '';
       if (cam.gate.feed(use, now)) onPiece(use);
-    }, function (msg) { if (card === mine) { card.camMsg = msg; drawCard(); } }, { torch: $('pieceTorch'), zoom: $('pieceZoom'), frame: $('pieceVf') });
+    }, function (msg) { if (card === mine) { card.camMsg = msg; drawCard(); } }, { torch: $('pieceTorch'), zoom: $('pieceZoom'), frame: $('pieceVf'), centreOnly: true, gate: card.gate, prefer: function () { return mine === card && card.codes ? card.codes : null; } });
   }
   /** the candidate of a read that belongs to this card (a quantity / lot suffix is cut off), else the first plausible one */
   function pieceRead(k) { for (var i = 0; i < k.cands.length; i++) if (card && card.codes && card.codes.indexOf(L.normScan(k.cands[i])) >= 0) return k.cands[i]; return k.cands[0]; }
@@ -1532,13 +1617,14 @@ if (typeof document !== 'undefined') (function () {
     if (photoDecoding) return;   // a photo is being read: the live camera must stay off until decodePhoto has called back
     photoUi('');
     var hint = L.makeIgnoreHint(), confirm = L.makeConfirm();
-    camStart($('scanVideo'), function (text) {
+    camStart($('scanVideo'), function (text, view) {
       var k = L.readClass(text, M), now = Date.now();
       $('scanHint').hidden = !hint.feed(k.kind, now);
       if (k.kind === 'ignored') { var rn = scanRej.note(text); if (rn) $('scanNote').textContent = rn; return; }   // a read that is not a part code: say so once (raw text shown), keep scanning
       if (k.kind !== 'plausible') return;                                   // empty
       var code = bestRead(k);
-      if (L.findPart(M, code) >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(code, true); syncLayer(); return; }
+      // a read from the whole-frame / strip views can be a neighbour's label: it must be seen twice (like an unknown code) before a card opens; band reads open at once
+      if (!L.isWideView(view) && L.findPart(M, code) >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(code, true); syncLayer(); return; }
       if (confirm.add(L.normScan(code))) { camStop(); $('scan').hidden = true; beep(); buzz(40); lookup(code, true); syncLayer(); }   // a plausible code that is not in the list: only after the same code was read twice in a row
     }, function (msg) { $('scanNote').textContent = msg; }, { torch: $('scanTorch'), zoom: $('scanZoom'), frame: $('scanVf'), onIdle: function () { $('scanNote').textContent = 'ถือห่างประมาณ 15-25 ซม. ให้บาร์โค้ดอยู่ในกรอบ หรือกดถ่ายรูปแทน'; } });
   }
@@ -1581,7 +1667,8 @@ if (typeof document !== 'undefined') (function () {
   function renderSug() {
     var box = $('codeSug'), live = $('codeSugLive'), inp = $('codeIn'), text = inp.value; clear(box); clear(live);
     if (!M || L.normScan(text).length < 2) { sugHint = false; inp.setAttribute('aria-expanded', 'false'); return; }
-    var r = L.suggestMatches(M, text, 8), typed = text.trim(), exact = L.findPart(M, text) >= 0;   // an exact code: just the matches (search opens it), no "unknown" row
+    var r = L.suggestMatches(M, text, 8), typed = text.trim(), exact = L.findPart(M, text) >= 0, vi = exact ? -1 : L.findPartVariant(M, text);
+    if (vi >= 0 && r.list.indexOf(vi) < 0) r = { list: [vi].concat(r.list), shown: [M.parts[vi].code2 || M.parts[vi].c1].concat(r.shown), total: r.total + 1 };   // a label variant of a listed part: that part's row   // an exact code: just the matches (search opens it), no "unknown" row
     if (exact) sugHint = false;
     if (sugHint) box.appendChild(el('div', 'hint', 'ไม่ตรงกับรหัสใดพอดี เลือกจากรายการ หรือบันทึกเป็นรหัสไม่รู้จัก'));
     if (!r.list.length) box.appendChild(el('div', 'caption', 'ไม่พบรหัสนี้ในรายการ — กดค้นหาเพื่อบันทึกเป็นรหัสไม่รู้จัก'));
@@ -1599,7 +1686,7 @@ if (typeof document !== 'undefined') (function () {
       grp.appendChild(b);
     });
     if (r.total > r.list.length) grp.appendChild(el('div', 'sugmore', 'และอีก ' + fmt(r.total - r.list.length) + ' รายการ พิมพ์เพิ่มเพื่อให้แคบลง'));
-    if (!exact) {
+    if (!exact && vi < 0) {
     var ub = btn('srow unk'); ub.appendChild(el('span', 'grow', 'ไม่มีในรายการ — บันทึก "' + typed + '" เป็นรหัสไม่รู้จัก'));
     ub.addEventListener('click', function () { openUnknownTyped(typed); });
     grp.appendChild(ub);
@@ -1612,10 +1699,11 @@ if (typeof document !== 'undefined') (function () {
   function goCode() {
     var v = $('codeIn').value; if (!v.trim()) return;
     if (switchBlocked()) return;
-    if (M && L.findPart(M, v) < 0 && L.isFullCode(v)) { openUnknownTyped(v.trim()); return; }   // a whole code that is not listed: like a scan of an unlisted product (refused while not verified: the text stays)
-    if (M && L.findPart(M, v) < 0 && L.suggestMatches(M, v, 1).total > 0) { sugHint = true; renderSug(); return; }
+    var fp = M ? L.findPart(M, v) : -1, vp = M && fp < 0 ? L.findPartVariant(M, v) : -1;
+    if (M && fp < 0 && vp < 0 && L.isFullCode(v)) { openUnknownTyped(v.trim()); return; }   // a whole code that is not listed: like a scan of an unlisted product (refused while not verified: the text stays)
+    if (M && fp < 0 && vp < 0 && L.suggestMatches(M, v, 1).total > 0) { sugHint = true; renderSug(); return; }
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }   // refused: keep the typed text
-    hideSug(); lookup(v, false);
+    hideSug(); lookup(vp >= 0 ? (M.parts[vp].code2 || M.parts[vp].c1) : v, false);
   }
 
   /* ---------------- camera (live) with photo fallback ---------------- */
@@ -1666,10 +1754,10 @@ if (typeof document !== 'undefined') (function () {
       if (caps.focusMode && caps.focusMode.indexOf && caps.focusMode.indexOf('continuous') >= 0) apply({ focusMode: 'continuous' });
       var ios = isIOS(), zp = L.zoomPlan(caps, ios ? 1.75 : 2);   // iOS without a virtual lens: a bit of zoom so the phone can be held farther away; the triple / dual-wide cameras handle close focus themselves (no automatic zoom, the button still works)
       if (zp && zoomBtn) {
-        var wideDef = camVirtual && caps.zoom && Number(caps.zoom.min) <= 1 && Number(caps.zoom.max) >= 2;   // iOS triple / dual-wide: min may be the ultra-wide lens, so start on the wide lens (2x)
+        var wideDef = camVirtual && camWide && caps.zoom && Number(caps.zoom.min) <= 1 && Number(caps.zoom.max) >= 2;   // iOS triple / dual-wide: min may be the ultra-wide lens, so start on the wide lens (2x)
         var noAuto = ios && camVirtual && !wideDef; cam.zoom = noAuto ? zp.min : (wideDef ? 2 : zp.def); if (!noAuto) apply({ zoom: cam.zoom });
         zoomBtn.hidden = false; zoomBtn.textContent = L.zoomLabel(cam.zoom);
-        zoomBtn.onclick = function () { cam.zoom = cam.zoom > zp.min ? zp.min : zp.def; apply({ zoom: cam.zoom }); zoomBtn.textContent = L.zoomLabel(cam.zoom); };
+        zoomBtn.onclick = function () { cam.zoom = cam.zoom > zp.min ? zp.min : (wideDef ? 2 : zp.def); apply({ zoom: cam.zoom }); zoomBtn.textContent = L.zoomLabel(cam.zoom); };
       }
       if (torchBtn && caps.torch) {
         torchBtn.hidden = false;
@@ -1682,8 +1770,9 @@ if (typeof document !== 'undefined') (function () {
   }
   function engineSaved() { try { return L.engineSavedValid(localStorage.getItem('sc5.engine'), Date.now()) ? 'zx' : ''; } catch (e) { return ''; } }
   function engineSave() { try { localStorage.setItem('sc5.engine', 'zx:' + Date.now()); } catch (e) { /* ignore */ } }
-  var camThrows = 0, camDeviceId = '', camVirtual = false;   // consecutive native detect() failures; the camera chosen earlier in this page session (+ whether it is an iOS triple / dual virtual lens)
+  var camThrows = 0, camDeviceId = '', camVirtual = false, camWide = false;   // consecutive native detect() failures; the camera chosen earlier in this page session (+ whether it is an iOS triple / dual virtual lens)
   var camBad = {};   // deviceIds whose exact open failed in this page session: never retried
+  var camZxHits = 0;   // ZXing-only band reads in a row across camera runs (a card opens after the first one, so a per-run count never reaches 2)
   var camEngineSession = '';   // 'zxing' once the native detector proved useless in this page session
   var CAM_VIDEO = { width: { ideal: 1920 }, height: { ideal: 1080 } };
   function isIOS() { try { return L.isIOS(navigator.userAgent, navigator.platform, navigator.maxTouchPoints); } catch (e) { return false; } }
@@ -1693,32 +1782,34 @@ if (typeof document !== 'undefined') (function () {
       try {
         var md = navigator.mediaDevices, tr = stream.getVideoTracks()[0], cur = '';
         try { cur = (tr && tr.getSettings && tr.getSettings().deviceId) || ''; } catch (e) { /* ignore */ }
-        var reopen = function (id, virt) {
+        var reopen = function (id, virt, wide) {
           stream.getTracks().forEach(function (t) { t.stop(); });
-          md.getUserMedia({ video: { deviceId: { exact: id }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).then(function (s2) { camDeviceId = id; camVirtual = !!virt; resolve(s2); }, function () {
-            camBad[id] = true; camDeviceId = ''; camVirtual = false;
+          md.getUserMedia({ video: { deviceId: { exact: id }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).then(function (s2) { camDeviceId = id; camVirtual = !!virt; camWide = !!wide; resolve(s2); }, function (err) {
+            if (L.camHardFail(err)) camBad[id] = true; camDeviceId = ''; camVirtual = false; camWide = false;
             md.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).then(resolve, function () { resolve(null); });
           });
         };
-        if (camDeviceId) { if (camDeviceId === cur) resolve(stream); else reopen(camDeviceId, camVirtual); return; }   // chosen earlier in this session: no new enumeration
+        if (camDeviceId) { if (camDeviceId === cur) resolve(stream); else reopen(camDeviceId, camVirtual, camWide); return; }   // chosen earlier in this session: no new enumeration
         if (!md.enumerateDevices) { resolve(stream); return; }
         md.enumerateDevices().then(function (devs) {
-          var id = L.pickBackCamera(devs), virt = false;
-          if (!id && isIOS()) { var pk = L.pickIosCamera(devs); if (pk) { id = pk.id; virt = pk.virtual; } }
+          var id = L.pickBackCamera(devs), virt = false, wide = false;
+          if (!id && isIOS()) { var pk = L.pickIosCamera(devs); if (pk) { id = pk.id; virt = pk.virtual; wide = pk.wide; } }
           if (run !== camRun) { resolve(stream); return; }
           if (id && camBad[id]) id = '';   // an exact open of this camera failed before: keep the stream we have
-          if (id && id === cur) { camDeviceId = id; camVirtual = virt; }
+          if (id && id === cur) { camDeviceId = id; camVirtual = virt; camWide = wide; }
           if (!id || id === cur) { resolve(stream); return; }
-          reopen(id, virt);
+          reopen(id, virt, wide);
         }, function () { resolve(stream); });
       } catch (e) { resolve(stream); }
     });
   }
-  var viewCv = null;
+  var viewCv = null, stripCv = null;   // separate canvases: the strip view (native detector) and the ZXing views are never resized into each other
   /** Another view of the live video for ZXing: 'full' = the whole frame (shrunk to 960 px on the long edge), 'rot' = the central vertical strip turned 90 degrees (a barcode held sideways). Full resolution, one reused canvas. */
   function viewCanvas(video, kind) {
-    var vw = video.videoWidth, vh = video.videoHeight, c = viewCv || (viewCv = document.createElement('canvas')), x;
+    var vw = video.videoWidth, vh = video.videoHeight, strip = kind === 'strip', c = strip ? (stripCv || (stripCv = document.createElement('canvas'))) : (viewCv || (viewCv = document.createElement('canvas'))), x;
     try { x = c.getContext('2d', { willReadFrequently: true }); } catch (e) { x = c.getContext('2d'); }
+    // (the native whole-frame view needs no canvas: the <video> itself goes to detect())
+    if (strip) { var tw = vw, th = Math.max(1, Math.round(vh * 0.2)), ty = Math.round((vh - th) / 2); if (c.width !== tw || c.height !== th) { c.width = tw; c.height = th; } x.drawImage(video, 0, ty, tw, th, 0, 0, tw, th); return c; }
     if (kind === 'full') { var k = Math.min(1, L.LIVE_FULL_MAX / Math.max(vw, vh)), fw = Math.max(1, Math.round(vw * k)), fh = Math.max(1, Math.round(vh * k)); c.width = fw; c.height = fh; x.drawImage(video, 0, 0, vw, vh, 0, 0, fw, fh); return c; }   // never a full 1080x1920 decode: the whole-frame view is shrunk to 960 px
     var sw = Math.max(1, Math.round(vw * 0.35)), sh = Math.max(1, Math.round(vh * 0.9)), sx = Math.round((vw - sw) / 2), sy = Math.round((vh - sh) / 2);
     c.width = sh; c.height = sw; x.setTransform(1, 0, 0, 1, 0, 0);
@@ -1726,8 +1817,10 @@ if (typeof document !== 'undefined') (function () {
     return c;
   }
   /** Builds decode(canvas, cb): native BarcodeDetector when it really supports 1D formats, ZXing otherwise; falls over to ZXing when native throws or reads nothing for ~4 s. */
-  function makeEngine(run, onReady, onNoLib) {
-    var st = { det: null, nativeOk: false, nativeBad: false, zx: false, started: Date.now(), hints: null, frames: 0, zxHits: 0 };
+  function makeEngine(run, onReady, onNoLib, eo) {
+    eo = eo || {};
+    camThrows = 0;   // throws of an earlier camera session must not add up to this session's 3-in-a-row switch
+    var st = { centreOnly: !!eo.centreOnly, det: null, nativeOk: false, nativeBad: false, zx: false, started: Date.now(), hints: null, frames: 0 };
     var needZX = function (cb) {
       loadZXing(function (ok) {
         if (run !== camRun) return;
@@ -1739,6 +1832,8 @@ if (typeof document !== 'undefined') (function () {
     var zxRead = function (canvas, video) {
       if (!st.zx) return '';
       var Z = window.ZXing, k = L.zxVariant(st.zxn++), c = canvas, inv = false;
+      if (st.centreOnly && (k === 'full' || k === 'rot')) k = 'band';   // piece counting: centre band only
+      st.zv = k;
       try {
         if (k === 'full' && video) c = viewCanvas(video, 'full'); else if (k === 'rot' && video) c = viewCanvas(video, 'rot'); else if (k === 'inv') inv = true;
       } catch (e) { c = canvas; inv = false; }
@@ -1746,20 +1841,32 @@ if (typeof document !== 'undefined') (function () {
     };
     st.zxn = 0;
     var decode = function (canvas, cb, video) {
-      if (st.nativeBad || !st.det) { cb(zxRead(canvas, video)); return; }
-      var after = function (t) {
-        if (t) { st.nativeOk = true; cb(t); return; }
-        if (!st.nativeOk && Date.now() - st.started > 4000) {   // native silent for 4 s: probe ZXing on every 3rd frame
-          if (!st.zx) needZX();
-          if (++st.frames % 3 === 0) {
-            var z = zxRead(canvas, video);
-            if (z) { if (++st.zxHits >= 2) { camEngineSession = 'zxing'; st.nativeBad = true; } cb(z); return; }
+      if (st.nativeBad || !st.det) { var zt = zxRead(canvas, video); cb(zt, st.zv); return; }
+      var after = function (t, view) {
+        if (t) { st.nativeOk = true; camZxHits = 0; cb(t, view); return; }
+        if (!st.nativeOk) {   // native silent for 4 s (counted from the first frame it looked at): probe ZXing on every 3rd frame
+          if (!st.firstAt) st.firstAt = Date.now();
+          if (Date.now() - st.firstAt > 4000) {
+            if (!st.zx) needZX();
+            if (++st.frames % 3 === 0) {
+              var z = zxRead(canvas, video);
+              // only a frame where native looked at the same centre band counts as evidence that ZXing is better; 2 such hits in a row switch the session to ZXing
+              if (nk === 'band') { if (z) { if (++camZxHits >= 2) { camEngineSession = 'zxing'; st.nativeBad = true; } } else camZxHits = 0; }
+              if (z) { cb(z, st.zv); return; }
+            }
           }
         }
         cb('');
       };
-      var broke = function () { st.nativeBad = true; camEngineSession = 'zxing'; if (++camThrows >= 3) engineSave(); needZX(); cb(''); };
-      try { st.det.detect(canvas).then(function (r) { camThrows = 0; after(L.pickLive(r)); }, broke); } catch (e) { broke(); }
+      var broke = function () { if (++camThrows >= 3) { st.nativeBad = true; camEngineSession = 'zxing'; engineSave(); needZX(); } cb(''); };   // a single throw keeps native; ZXing only after 3 in a row
+      var src = canvas, nk = L.nativeViewFor(st.nn = (st.nn || 0) + 1, st.centreOnly), cw = canvas.width, ch = canvas.height;
+      try {
+        if (video && nk === 'full') { src = video; cw = video.videoWidth; ch = video.videoHeight; }   // the whole frame at native size: the <video> goes straight to detect(), no canvas copy
+        else if (video && nk === 'strip') { src = viewCanvas(video, 'strip'); cw = src.width; ch = src.height; }
+      } catch (e0) { src = canvas; nk = 'band'; cw = canvas.width; ch = canvas.height; }
+      var po = { cx: cw / 2, cy: ch / 2, prefer: eo.prefer ? eo.prefer() : null };
+      var broke2 = function () { if (run !== camRun) cb(''); else broke(); };   // a failure from a stale run must not bump camThrows / engineSave()
+      try { st.det.detect(src).then(function (r) { if (run === camRun) camThrows = 0; after(L.pickLive(r, M, po), nk); }, broke2); } catch (e) { broke2(); }
     };
     var go = function (useNative) {
       if (useNative) { st.det = makeDetector(L.ONE_D_NATIVE); }
@@ -1778,13 +1885,13 @@ if (typeof document !== 'undefined') (function () {
     opts = opts || {};
     camStop();
     var run = camRun, idleDone = false, idleAt = Date.now() + 8000;
-    cam.gate = L.makeGate(700);
+    cam.gate = opts.gate || L.makeGate(700);   // the piece card passes its own gate, so a restart with the same barcode still in view does not count it again
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nocam');
       var firstOpen = function () { return navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }); };
       // the camera chosen earlier in this page session is opened directly (one open, not two: iOS shows the camera twice otherwise); on error fall back to facingMode
       var firstP = (camDeviceId && !camBad[camDeviceId])
-        ? navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: camDeviceId }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).catch(function () { camBad[camDeviceId] = true; camDeviceId = ''; camVirtual = false; return firstOpen(); })
+        ? navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: camDeviceId }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).catch(function (err) { if (L.camHardFail(err)) camBad[camDeviceId] = true; camDeviceId = ''; camVirtual = false; camWide = false; return firstOpen(); })
         : firstOpen();
       firstP.then(function (first) {
         if (run !== camRun) { first.getTracks().forEach(function (t) { t.stop(); }); return; }
@@ -1795,12 +1902,12 @@ if (typeof document !== 'undefined') (function () {
           video.setAttribute('playsinline', ''); video.setAttribute('autoplay', ''); video.muted = true;
           video.srcObject = stream; setupTrack(stream, opts.torch, opts.zoom);
           var p; try { p = video.play(); } catch (e0) { p = null; } if (p && p.catch) p.catch(function () { /* autoplay refused: the stream still decodes */ });
-          var wrapped = function (text) {
+          var wrapped = function (text, view) {
             if (text) idleDone = true;
             else if (!idleDone && opts.onIdle && Date.now() > idleAt) { idleDone = true; try { opts.onIdle(); } catch (e2) { /* ignore */ } }
-            onFrame(text);
+            onFrame(text, view);
           };
-          makeEngine(run, function (decode) { if (run === camRun) bandLoop(run, video, opts.frame, wrapped, decode, idleAt, function () { if (!idleDone) { idleDone = true; if (opts.onIdle) opts.onIdle(); } }); }, function () { if (run === camRun) { camStop(); onFail(camMessage(new Error('nolib'))); } });
+          makeEngine(run, function (decode) { if (run === camRun) bandLoop(run, video, opts.frame, wrapped, decode, idleAt, function () { if (!idleDone) { idleDone = true; if (opts.onIdle) opts.onIdle(); } }); }, function () { if (run === camRun) { camStop(); onFail(camMessage(new Error('nolib'))); } }, { centreOnly: !!opts.centreOnly, prefer: opts.prefer });
         });
       }).catch(function (e) { if (run === camRun) { camStop(); onFail(camMessage(e)); } });
     } catch (e) { camStop(); onFail(camMessage(e)); }
@@ -1819,7 +1926,7 @@ if (typeof document !== 'undefined') (function () {
         if (canvas.width !== r.sw || canvas.height !== r.sh) { canvas.width = r.sw; canvas.height = r.sh; }
         if (!shaped && frameEl && frameEl.style) { shaped = true; frameEl.style.aspectRatio = r.sw + ' / ' + r.sh; }   // the viewfinder shows (about) the band that is decoded
         ctx.drawImage(video, r.sx, r.sy, r.sw, r.sh, 0, 0, r.sw, r.sh);
-        var fin = false, finish = function (text) { if (fin) return; fin = true; if (run === camRun) { try { onFrame(text); } catch (e1) { /* ignore */ } } again(); };
+        var fin = false, finish = function (text, view) { if (fin) return; fin = true; if (run === camRun) { try { onFrame(text, view); } catch (e1) { /* ignore */ } } again(); };
         setTimeout(function () { finish(''); }, 2000);   // a decoder that never answers must not stall the loop
         decode(canvas, finish, video);
       } catch (e) { again(); }
@@ -1837,11 +1944,13 @@ if (typeof document !== 'undefined') (function () {
       if (img) { img.onload = img.onerror = null; }
       if (url) { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } }
       try { cb(t || '', t ? undefined : (why || PHOTO_FAIL)); } catch (e2) { /* the caller's problem; never rethrow into the event loop */ }
+      // the scan sheet was opened while this (other) decode ran and shows 'busy': its own handler already settled the display if it started this decode, so a busy still showing is stale
+      try { if (!$('scan').hidden && !$('scanBusy').hidden) { photoUi(''); resumeScanCam(); } } catch (e3) { /* ignore */ }
     };
     try {
       timer = setTimeout(function () { fin('', PHOTO_FAIL); }, 30000);
       url = URL.createObjectURL(file); img = new Image();
-      img.onload = function () { try { photoViews(img, fin); } catch (e) { fin('', PHOTO_FAIL); } };
+      img.onload = function () { try { photoViews(img, fin, function () { return done; }); } catch (e) { fin('', PHOTO_FAIL); } };
       img.onerror = function () { fin('', PHOTO_FAIL); };
       img.src = url;
     } catch (e) { fin('', PHOTO_FAIL); }
@@ -1855,12 +1964,14 @@ if (typeof document !== 'undefined') (function () {
     x.drawImage(img, v.sx, v.sy, v.sw, v.sh, 0, 0, v.dw, v.dh);
     return c;
   }
-  function photoViews(img, fin) {
+  function photoViews(img, fin, isDone) {
+    isDone = isDone || function () { return false; };
     var iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, t0 = Date.now();
     var plan = L.photoViewPlan(iw, ih), det = makeDetector(L.ONE_D_NATIVE.concat(['qr_code'])), Z = null, i = 0;
     var next = function () { setTimeout(step, 0); };
     var release = function (c) { try { c.width = c.height = 0; } catch (e) { /* ignore */ } };
     var qrPass = function () {
+      if (isDone()) return;
       // no 1D barcode in any view: a QR (link) is better than nothing, so the caller can say "that is not a part code"
       try {
         var wv = plan.filter(function (v) { return v.tag === 'whole'; })[0] || plan[0], c = photoCanvas(img, wv), t = Z ? L.zxDecodeSource(Z, new Z.HTMLCanvasElementLuminanceSource(c), L.zxHints(Z, true)) : '';
@@ -1868,6 +1979,7 @@ if (typeof document !== 'undefined') (function () {
       } catch (e) { fin('', PHOTO_FAIL); }
     };
     var step = function () {
+      if (isDone()) return;   // the 30 s timeout already answered: stop working
       if (i >= plan.length || Date.now() - t0 > L.PHOTO_BUDGET_MS) { qrPass(); return; }   // time-boxed: the view count alone is not a bound on a slow phone
       var v = plan[i++], c;
       try { c = photoCanvas(img, v); } catch (e) { next(); return; }
@@ -2005,7 +2117,10 @@ if (typeof document !== 'undefined') (function () {
 
   /* ---------------- events ---------------- */
   function wire() {
-    $('locPick').addEventListener('change', function () { switchLoc(this.value, false); });   // v7: a roaming person goes to another location: a fresh list from the server for it
+    $('locPick').addEventListener('change', function () {
+      if (card && M && M.loc && this.value !== M.loc) { this.value = M.loc; toast('บันทึกหรือกลับก่อน'); return; }   // an open card (pieces, unknown photo + draft) is never thrown away by a place switch
+      switchLoc(this.value, false);
+    });   // v7: a roaming person goes to another location: a fresh list from the server for it
     $('scanBtn').addEventListener('click', openScan);
     $('scanClose').addEventListener('click', closeScan);
     $('scanFile').addEventListener('click', function () { pickerOpen = true; camStop(); });   // iOS: the live camera must be off before the photo picker opens
