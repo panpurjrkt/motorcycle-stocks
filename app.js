@@ -235,7 +235,7 @@ var StockLib = (function () {
   L.dailyCount = function (done, total) { return total > 0 && done >= total ? { full: true } : { full: false, done: done, total: total }; };
 
   /* ---- Settings page (the gear): pure helpers ---- */
-  L.APP_VERSION = '2026111401';   // = the ?v= number on app.js in index.html (bump both together)
+  L.APP_VERSION = '2026111402';   // = the ?v= number on app.js in index.html (bump both together)
   /** '2026111302' -> '2026.11.13' (a 2nd, 3rd... release of the same day shows as '2026.11.13 (2)') */
   L.versionText = function (v) { var m = /^(\d{4})(\d{2})(\d{2})(\d{2})$/.exec(str(v)); if (!m) return str(v); var n = parseInt(m[4], 10); return m[1] + '.' + m[2] + '.' + m[3] + (n > 1 ? ' (' + n + ')' : ''); };
   /** The calendar day in Asia/Bangkok (UTC+7, no summer time) as 'YYYY-MM-DD' for a time in ms. */
@@ -278,6 +278,15 @@ var StockLib = (function () {
     }
     cols(b.items, m.items, true);
     cols(b.second, m.second, false);
+    m.xs = Object.create(null);   // counted EXTRA shelves (typed shelves that are not DMS shelves of the part), per part: [{ shelf, done: true, on, by }] (an old server sends no xs)
+    (function (c) {
+      var xp = c.p || [];
+      for (var j = 0; j < xp.length; j++) {
+        var pi = xp[j], sh = str((c.shelf || [])[j]);
+        if (m.byPart[pi] === undefined || !sh.trim()) continue;
+        (m.xs[pi] = m.xs[pi] || []).push({ shelf: sh, done: true, on: str((c.on || [])[j]), by: str((c.by || [])[j]) });
+      }
+    })(b.xs || {});
     (b.locked || []).forEach(function (p) { m.locked[p] = true; });
     (b.cards || []).forEach(function (c) { m.cards[c.p] = (c.shelves || []).map(function (s) { return { shelf: str(s.shelf), done: !!s.done, doneOn: str(s.doneOn), doneBy: str(s.doneBy) }; }); });
     return m;
@@ -348,6 +357,10 @@ var StockLib = (function () {
     if (!forceFirst && m.cards[p]) { base.second = true; base.locked = false; base.shelves = m.cards[p].map(function (s) { return copy(s); }); return base; }
     base.second = false; base.locked = !!m.locked[p];
     base.shelves = m.byPart[p].map(function (it) { return { shelf: it.shelf, done: it.done, doneOn: it.on, doneBy: it.by }; });
+    ((m.xs && m.xs[p]) || []).forEach(function (x) {   // a typed shelf that was counted (not a DMS shelf of this part): its own row, marked extra so a pick saves as otherShelf
+      if (base.shelves.some(function (s) { return sameShelf(s.shelf, x.shelf); })) return;   // it IS a DMS shelf of the part: dropped (the DMS shelf shows its own state; the server needs the count in the DMS slot itself)
+      base.shelves.push({ shelf: x.shelf, done: true, doneOn: x.on, doneBy: x.by, extra: true });
+    });
     return base;
   };
   /** The card of a row of the second list (blind count): the blind card when the server sent one, else the shelves of that part in the list. */
@@ -477,6 +490,15 @@ var StockLib = (function () {
     var x = str(a).trim().toLowerCase(), y = str(b).trim().toLowerCase();
     return x === y || (L.normScan(a) !== '' && L.normScan(a) === L.normScan(b));
   }
+  L.sameShelf = sameShelf;   // (the page's shelf picker uses the same rule)
+  /** The server's shelf match: an EXACT name first (trim, case-insensitive), then the normalised sameShelf rule - so 'A-1' and 'A1' stay two shelves. arr = objects, key = the name field; returns the item or null. */
+  L.findShelf = function (arr, key, want) {
+    var w = str(want).trim().toLowerCase(), i;
+    for (i = 0; i < arr.length; i++) if (str(arr[i][key]).trim().toLowerCase() === w) return arr[i];
+    for (i = 0; i < arr.length; i++) if (sameShelf(arr[i][key], want)) return arr[i];
+    return null;
+  };
+  function hidden(o, k, v) { Object.defineProperty(o, k, { value: v, writable: true, enumerable: false, configurable: true }); }   // bookkeeping that must not show in JSON / comparisons
   function pct(p) { p.pct = p.total ? Math.round(p.done / p.total * 100) : 0; }
 
   /**
@@ -495,17 +517,31 @@ var StockLib = (function () {
     var p = m.idIndex[L.normId(body.id)];
     if (p === undefined) return null;
     var want = body.otherShelf !== undefined && str(body.otherShelf).trim() ? body.otherShelf : body.shelf, list = body.second ? m.second : m.byPart[p], hit = null;
-    for (var i = 0; i < list.length; i++) { if (list[i].p === p && sameShelf(list[i].shelf, want)) { hit = list[i]; break; } }
+    hit = L.findShelf(list.filter(function (x) { return x.p === p; }), 'shelf', want);
     var undo = { item: hit, done: hit ? hit.done : false, on: hit ? hit.on : '', by: hit ? hit.by : '', progress: copy(m.progress), dDone: 0, dMine: 0, card: null };
     if (body.second && m.cards[p]) {   // the blind card shows the shelf as counted too
-      m.cards[p].forEach(function (s) { if (sameShelf(s.shelf, want)) { undo.card = { s: s, done: s.done, on: s.doneOn, by: s.doneBy }; s.done = true; s.doneOn = today; s.doneBy = who; } });
+      var bs = L.findShelf(m.cards[p], 'shelf', want);
+      m.cards[p].forEach(function (s) { if (s === bs) { undo.card = { s: s, done: s.done, on: s.doneOn, by: s.doneBy }; s.done = true; s.doneOn = today; s.doneBy = who; } });
     }
     if (hit) {
       var mineAlready = hit.done && hit.by === who && hit.on === today;
       if (!body.second && !hit.done) { m.progress.done++; undo.dDone = 1; }
       if (!mineAlready) { m.progress.mine++; undo.dMine = 1; }
       hit.done = true; hit.on = today; hit.by = who;
-    } else if (!body.second) { m.progress.mine++; undo.dMine = 1; }   // an extra (typed) shelf: counts as my work only
+    } else if (!body.second) {   // an extra (typed) shelf: counts as my work only, and the card lists it as a counted shelf (m.xs)
+      var xmine = false;   // (the same "my own count today again" rule as the DMS items)
+      if (str(want).trim()) {
+        m.xs = m.xs || Object.create(null);
+        var xl = m.xs[p] = m.xs[p] || [], xh = null;
+        xh = L.findShelf(xl, 'shelf', want);
+        if (xh) xmine = xh.by === who && xh.on === today;
+        else { xh = { shelf: str(want).trim(), done: true, on: today, by: who }; xl.push(xh); hidden(xh, '_base', null); hidden(xh, '_h', []); }
+        if (!xh._h) { hidden(xh, '_base', { on: xh.on, by: xh.by }); hidden(xh, '_h', []); }
+        var rec = { on: today, by: who }; xh._h.push(rec); xh.on = today; xh.by = who;   // each queued save leaves a record: a refusal drops only its own
+        undo.xs = { list: xl, e: xh, rec: rec };
+      }
+      if (!xmine) { m.progress.mine++; undo.dMine = 1; }
+    }
     if (body.second) m.progress.second = m.second.filter(function (x) { return !x.done; }).length;
     pct(m.progress);
     return undo;
@@ -514,6 +550,15 @@ var StockLib = (function () {
     if (!m || !undo) return;
     if (undo.ext) { undo.ext.doneOn = undo.on; undo.ext.doneBy = undo.by; return; }
     if (undo.item) { undo.item.done = undo.done; undo.item.on = undo.on; undo.item.by = undo.by; }
+    if (undo.xs) {   // drop this save's record; the entry shows the newest record left, else its boot values, else (created by a refused save alone) it goes away
+      var xe2 = undo.xs.e, ri = xe2._h ? xe2._h.indexOf(undo.xs.rec) : -1;
+      if (ri >= 0) {
+        xe2._h.splice(ri, 1);
+        if (xe2._h.length) { var last = xe2._h[xe2._h.length - 1]; xe2.on = last.on; xe2.by = last.by; }
+        else if (xe2._base) { xe2.on = xe2._base.on; xe2.by = xe2._base.by; }
+        else { var xi = undo.xs.list.indexOf(xe2); if (xi >= 0) undo.xs.list.splice(xi, 1); }
+      }
+    }
     if (undo.card) { undo.card.s.done = undo.card.done; undo.card.s.doneOn = undo.card.on; undo.card.s.doneBy = undo.card.by; }
     if (undo.dDone === undefined) { m.progress = copy(undo.progress); return; }   // (an old-style record: whole snapshot)
     m.progress.done = Math.max(0, m.progress.done - undo.dDone); m.progress.mine = Math.max(0, m.progress.mine - undo.dMine);   // only this save's own change: later queued saves keep theirs
@@ -1942,6 +1987,18 @@ if (typeof document !== 'undefined') (function () {
   }
   function shelfInfo(name) { for (var i = 0; i < card.shelves.length; i++) if (card.shelves[i].shelf === name) return card.shelves[i]; return null; }
 
+  /** The note shown when 2+ shelves of the part are counted: "นับแล้ว N ชั้น", one line per counted shelf, then the redo rule. null when fewer. */
+  function countedNote() {
+    var done = card.shelves.filter(function (s) { return s.done; });
+    if (done.length < 2) return null;
+    var d = el('div', 'note'), g = el('div', 'grow');
+    d.appendChild(ic('info'));
+    g.appendChild(el('div', '', 'นับแล้ว ' + done.length + ' ชั้น'));
+    done.forEach(function (s) { g.appendChild(el('div', '', '• ชั้น ' + s.shelf + ' — ' + s.doneOn + ' โดย ' + s.doneBy)); });
+    g.appendChild(el('div', '', 'นับชั้นเดิมซ้ำ = แทนที่ค่าเดิม'));
+    d.appendChild(g); return d;
+  }
+
   function drawCard() {
     camStop();
     var box = $('card'); clear(box);
@@ -1961,6 +2018,7 @@ if (typeof document !== 'undefined') (function () {
 
     var grp = null;
     if (card.ext) box.appendChild(noteBox('note', 'info', 'อะไหล่จากสาขาอื่น/สำนักงานใหญ่ นับที่นี่ได้ตามปกติ'));
+    if (!card.ext && !card.second && !card.locked) { var cnt = countedNote(); if (cnt) box.appendChild(cnt); }   // 2+ counted shelves of this part: who counted which (never a quantity)
     if (card.shelf !== null && card.shelf !== '') {
       grp = el('div', 'group'); var srow = el('div', 'item');
       srow.appendChild(ic('map-pin')); srow.appendChild(el('span', 'grow', 'ชั้น ' + card.shelf)); grp.appendChild(srow);
@@ -1974,7 +2032,7 @@ if (typeof document !== 'undefined') (function () {
       chg.addEventListener('click', function () { card.shelf = null; card.other = false; card.qty = 0; card.lock = ''; card.warn = ''; drawCard(); });
       grp.appendChild(chg); box.appendChild(grp);
     }
-    var info = card.ext ? (card.extDone ? { done: true, doneOn: card.extDone.doneOn, doneBy: card.extDone.doneBy } : null) : (card.other ? null : shelfInfo(card.shelf));
+    var info = card.ext ? (card.extDone ? { done: true, doneOn: card.extDone.doneOn, doneBy: card.extDone.doneBy } : null) : shelfInfo(card.shelf);
     if (info && info.done) box.appendChild(noteBox('note', 'info', 'นับแล้ว ' + info.doneOn + ' โดย ' + info.doneBy + ' — นับใหม่จะแทนที่ค่าเดิม'));
 
     var tabs = el('div', 'seg'); tabs.setAttribute('role', 'tablist');
@@ -2008,7 +2066,7 @@ if (typeof document !== 'undefined') (function () {
       var b = btn('shelfpick item'), two = el('div', 'two');
       two.appendChild(el('div', 'l1', s.shelf)); two.appendChild(el('div', 'l2', s.done ? 'นับแล้ว ' + s.doneOn + ' โดย ' + s.doneBy : 'ยังไม่ได้นับ'));
       b.appendChild(two); b.appendChild(ic('chevron-right'));
-      b.addEventListener('click', function () { card.shelf = s.shelf; card.other = false; card.err = ''; drawCard(); });
+      b.addEventListener('click', function () { card.shelf = s.shelf; card.other = !!s.extra; card.err = ''; drawCard(); });   // a counted typed shelf saves as otherShelf
       grp.appendChild(b);
     });
     var o = btn('shelfpick item'), ot = el('div', 'two');
@@ -2023,7 +2081,9 @@ if (typeof document !== 'undefined') (function () {
     ok.addEventListener('click', function () {
       var v = inp.value.trim();
       if (!v) { msg.className = 'msg err spaced'; msg.textContent = 'กรุณาพิมพ์ชื่อชั้นวาง'; return; }
-      card.shelf = v; card.other = true; card.err = ''; drawCard();
+      var same = L.findShelf(card.shelves, 'shelf', v);   // a name that is already a shelf of this part is that shelf (no duplicate)
+      if (same) { card.shelf = same.shelf; card.other = !!same.extra; } else { card.shelf = v; card.other = true; }
+      card.err = ''; drawCard();
     });
     form.appendChild(ok); box.appendChild(form);
   }
