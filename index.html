@@ -372,6 +372,80 @@ body.sheet-open { overflow:hidden; }
 /* snackbar */
 .toast { position:fixed; left:max(16px, env(safe-area-inset-left, 0px)); right:max(16px, env(safe-area-inset-right, 0px)); bottom:max(20px, env(safe-area-inset-bottom, 0px)); z-index:40; background:var(--snack); color:var(--on-snack); border-radius:12px; padding:10px 16px; font-size:14px; line-height:1.5; text-align:center; max-width:528px; margin:0 auto; box-shadow:var(--sh-toast); animation:fade .1s; }
 
+/* unknown code: the photo section */
+.ph { display:flex; flex-direction:column; gap:8px; margin:12px 0; }
+.phhead { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.phhead b { font-size:16px; font-weight:600; }
+.req { font-size:12px; font-weight:600; border-radius:99px; padding:2px 10px; background:var(--warn-bg); color:var(--warn-ink); }
+.req.done { background:var(--ok-bg); color:var(--ok-ink); }
+.phtile { border:2px dashed var(--primary); background:var(--tonal); border-radius:16px; min-height:150px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; cursor:pointer; color:var(--on-tonal); font:600 19px/1.4 var(--sans); width:100%; padding:16px; position:relative; overflow:hidden; text-align:center; }
+.phtile:active { filter:brightness(.97); }
+.phtile:focus-within { outline:2px solid var(--primary); outline-offset:2px; }
+.phtile .cam { width:60px; height:60px; border-radius:50%; background:var(--primary); color:var(--on-primary); display:grid; place-items:center; }
+.phtile .cam .ic.big { width:30px; height:30px; }
+.phtile.alt { min-height:0; padding:12px; font-size:16px; border-style:solid; }   /* the gallery picker beside the camera tile (after a restored draft) */
+.phtile.has { border:2px solid var(--ok); background:var(--surface); min-height:0; padding:0; }
+.phtile.has img { display:block; width:100%; height:170px; object-fit:cover; }
+.retake { position:absolute; right:10px; bottom:10px; background:var(--snack); color:var(--on-snack); opacity:.92; border-radius:99px; padding:6px 14px; font-size:14px; font-weight:500; display:flex; align-items:center; gap:6px; }
+.retake .ic { width:16px; height:16px; }
+.need { display:flex; align-items:center; gap:10px; background:var(--warn-bg); color:var(--warn-ink); border-radius:12px; padding:12px 14px; font-size:clamp(14px, 4.4vw, 17px); font-weight:600; line-height:1.4; white-space:nowrap; overflow:hidden; }   /* one line from 320 px up: the text shrinks instead of wrapping */
+.need .ic { flex:none; width:22px; height:22px; }
+
+/* iPhone "add to home screen" picture tutorial */
+body.a2on .toast { bottom:var(--a2top, 340px); }   /* the toast rides above the card (app.js sets --a2top and the page's bottom padding from the card's real height) */
+.a2hs { position:fixed; left:max(12px, env(safe-area-inset-left, 0px)); right:max(12px, env(safe-area-inset-right, 0px)); bottom:calc(env(safe-area-inset-bottom, 0px) + 12px); z-index:20; max-width:536px; margin:0 auto; padding:12px 14px; display:flex; flex-direction:column; gap:8px; background:var(--surface); border:1px solid var(--line); border-radius:18px; box-shadow:var(--sh-sheet); }
+.a2hs.a2hi { bottom:calc(env(safe-area-inset-bottom, 0px) + 72px); }   /* Safari 26: the floating bar sits over the bottom of the page */
+.a2h { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+.a2h b { font-size:15px; font-weight:600; }
+.a2txt { font-size:15px; line-height:1.5; font-weight:500; padding:4px 0; }
+.a2ill { height:108px; border-radius:12px; background:var(--hover); position:relative; overflow:hidden; cursor:pointer; touch-action:manipulation; }
+.a2fr { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; opacity:0; transition:opacity .35s; pointer-events:none; }
+.a2fr.on { opacity:1; }
+.a2hs .ic { color:var(--mute); }
+.a2hot { position:relative; color:var(--primary); }
+.a2hot .ic { color:var(--primary); }
+.a2hs .pbtn .ic { color:inherit; }
+.a2hot::after { content:""; position:absolute; inset:-6px; border-radius:999px; border:2.5px solid var(--amber); animation:a2ring 1.4s infinite; }
+.a2hot.sq::after { border-radius:10px; }
+@keyframes a2ring { 0% { transform:scale(.85); opacity:1; } 100% { transform:scale(1.25); opacity:0; } }
+.a2bar { width:92%; display:flex; gap:6px; align-items:center; }
+.a2pill { height:36px; border-radius:999px; background:var(--surface); display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--mute); box-shadow:var(--sh-1); border:1px solid var(--line); }
+.a2pill.nav { padding:0 10px; font-size:15px; }
+.a2pill.url { flex:1; min-width:0; justify-content:space-between; padding:0 10px 0 6px; gap:6px; }
+.a2pill.url .u { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.a2pill.tab { width:36px; }
+.a2dots { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:var(--hover); }
+.a2tool { width:92%; height:44px; border-radius:14px; background:var(--surface); border:1px solid var(--line); display:flex; align-items:center; justify-content:space-around; }
+.a2ml { width:86%; background:var(--surface); border-radius:12px; overflow:hidden; font-size:12.5px; border:1px solid var(--line); }
+.a2ml div { display:flex; align-items:center; gap:10px; padding:5px 12px; color:var(--faint); }
+.a2ml div + div { border-top:1px solid var(--line); }
+.a2ml div.hl { color:var(--ink); font-weight:600; background:var(--warn-bg); }
+.a2ml div.hl .ic { color:var(--primary); }
+.a2ml .en { font-size:10.5px; color:var(--faint); font-weight:400; margin-left:auto; }
+.a2rnd { display:flex; gap:12px; }
+.a2rnd span { display:flex; flex-direction:column; align-items:center; gap:4px; font-size:10.5px; color:var(--faint); }
+.a2rnd i { width:38px; height:38px; border-radius:50%; background:var(--surface); display:flex; align-items:center; justify-content:center; font-style:normal; border:1px solid var(--line); }
+.a2rnd span.hl { color:var(--ink); font-weight:600; }
+.a2add { width:86%; background:var(--surface); border-radius:12px; border:1px solid var(--line); padding:8px 12px; display:flex; align-items:center; gap:10px; font-size:12.5px; }
+.a2add .ti { flex:1; min-width:0; font-weight:600; }
+.a2add .ok { padding:4px 12px; border-radius:99px; color:var(--primary); font-weight:600; }
+.a2cap { font-size:14px; font-weight:600; display:flex; gap:8px; align-items:center; min-height:22px; }
+.a2cap b { width:22px; height:22px; border-radius:50%; background:var(--primary); color:var(--on-primary); font-size:12px; display:flex; align-items:center; justify-content:center; flex:none; }
+.a2nav { display:flex; gap:0; justify-content:center; }
+.a2nav button { width:32px; height:32px; padding:12px; border:0; border-radius:50%; background:var(--outline); background-clip:content-box; cursor:pointer; }
+.a2nav button.on { width:44px; border-radius:99px; background-color:var(--primary); background-clip:content-box; }
+.a2note { font-size:12.5px; color:var(--mute); line-height:1.4; }
+.a2btns { display:flex; gap:8px; }
+.a2btns button { flex:1; min-height:44px; font:inherit; font-size:15px; border-radius:12px; border:1px solid var(--outline); background:var(--surface); color:var(--ink); cursor:pointer; }
+.a2btns button.p { background:var(--primary); border-color:var(--primary); color:var(--on-primary); font-weight:600; }
+.a2btns button:active { filter:brightness(.92); }
+.a2pt { position:absolute; left:31%; bottom:-26px; font-size:20px; line-height:1; color:var(--amber); animation:a2bob 1s infinite alternate; pointer-events:none; }
+@media (max-width:360px) { .a2ml .en { display:none; } .a2ml div { padding:5px 10px; gap:8px; } .a2rnd { gap:8px; } .a2add { width:92%; } .a2ml { width:92%; } }
+@keyframes a2bob { to { transform:translateY(5px); } }
+.a2pt.r { left:auto; right:18px; }
+.a2pu { position:fixed; top:calc(env(safe-area-inset-top, 0px) + 4px); right:20px; font-size:22px; line-height:1; color:var(--amber); animation:a2bobu 1s infinite alternate; pointer-events:none; }
+@keyframes a2bobu { to { transform:translateY(-5px); } }
+
 @keyframes sheetUp { from { transform:translateY(24px); opacity:0; } to { transform:none; opacity:1; } }
 @keyframes fade { from { opacity:0; } to { opacity:1; } }
 @media (prefers-reduced-motion:reduce) { *, *::before, *::after { animation:none !important; transition:none !important; } }
@@ -435,10 +509,105 @@ body.sheet-open { overflow:hidden; }
         <button class="ibtn" id="gear" type="button" aria-label="ตั้งค่า" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg></button>
       </div>
     </header>
-    <div id="installBox" class="stack" hidden>
-      <button type="button" class="pbtn" id="installBtn" hidden style="min-height:64px;font-size:20px;font-weight:600">ติดตั้งแอปลงหน้าจอ</button>
-      <div id="installPerm" class="sub" hidden style="font-size:14px;line-height:1.5">ถ้ากดติดตั้งแล้วไม่มีไอคอน: ตั้งค่า → แอป → Chrome → สิทธิ์ → เปิด 'ทางลัดหน้าจอหลัก'</div>
-      <div id="installHelp" class="sub" hidden style="font-size:14px;line-height:1.5;display:flex;gap:8px;align-items:flex-start"><span id="installHelpTxt" style="flex:1 1 auto"></span><button type="button" class="tbtn" id="installHelpX" aria-label="ปิดคำแนะนำ">ปิด</button></div>
+    <div id="a2hs" class="a2hs" role="region" aria-label="เพิ่มแอปลงหน้าจอโฮม" hidden>
+      <div class="a2h"><b id="a2Title">เพิ่มแอปลงหน้าจอโฮม</b><span class="sub" id="a2Steps"></span></div>
+      <div id="a2Queue" class="a2txt" hidden>ส่งงานให้หมดก่อน แล้วค่อยเพิ่มแอปลงหน้าจอโฮม</div>
+      <div id="a2Text" class="a2txt" hidden></div>
+      <div id="a2One" class="stack" style="gap:8px" hidden>
+        <button type="button" class="pbtn" id="a2Install" style="min-height:56px;font-size:18px;font-weight:600"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg>ติดตั้งแอป</button>
+        <div class="a2note">กด "ติดตั้ง" ที่หน้าต่างที่ขึ้นมา</div>
+      </div>
+      <div id="a2Vis" class="stack" style="gap:8px">
+        <div class="a2ill" id="a2Ill" role="button" tabindex="0" aria-label="แตะเพื่อดูขั้นถัดไป">
+          <div id="a2g-s26" hidden>
+            <div class="a2fr" id="a2f-s26-1"><div class="a2bar">
+              <span class="a2pill nav">‹ ›</span>
+              <span class="a2pill url"><span class="a2dots a2hot"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h9"/></svg></span><span class="u">github.io</span><span>↻</span></span>
+              <span class="a2pill tab">▢</span>
+            </div></div>
+            <div class="a2fr" id="a2f-s26-2"><div class="a2ml">
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v10H9l-5 4z"/></svg>แปลภาษา</div>
+              <div class="hl"><span class="a2hot sq"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M8 7l4-4 4 4M6 11v9h12v-9"/></svg></span>แชร์<span class="en">Share</span></div>
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg>เพิ่มบุ๊กมาร์ก</div>
+            </div></div>
+            <div class="a2fr" id="a2f-s26-3"><div class="a2rnd">
+              <span><i><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V4h12"/></svg></i>คัดลอก</span>
+              <span><i><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg></i>บุ๊กมาร์ก</span>
+              <span><i><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="14" r="3.5"/><circle cx="18" cy="14" r="3.5"/><path d="M9.5 14h5"/></svg></i>อ่านทีหลัง</span>
+              <span class="hl"><i class="a2hot"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></i>ดูเพิ่มเติม</span>
+            </div></div>
+            <div class="a2fr" id="a2f-s26-4"><div class="a2ml">
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l3 3v15H6z"/><circle cx="12" cy="13" r="3"/></svg>ค้นหาในหน้า</div>
+              <div class="hl"><span class="a2hot sq"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M12 8v8M8 12h8"/></svg></span>เพิ่มไปยังหน้าจอโฮม<span class="en">Add to Home Screen</span></div>
+            </div></div>
+          </div>
+          <div id="a2g-s18" hidden>
+            <div class="a2fr" id="a2f-s18-1"><div class="a2tool">
+              <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+              <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+              <span class="a2hot sq"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M8 7l4-4 4 4M6 11v9h12v-9"/></svg></span>
+              <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h7a1 1 0 0 1 1 1v13a2 2 0 0 0-2-2H4zM20 5h-7a1 1 0 0 0-1 1v13a2 2 0 0 1 2-2h6z"/></svg>
+              <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+            </div></div>
+            <div class="a2fr" id="a2f-s18-2"><div class="a2ml">
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg>เพิ่มบุ๊กมาร์ก</div>
+              <div class="hl"><span class="a2hot sq"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M12 8v8M8 12h8"/></svg></span>เพิ่มไปยังหน้าจอโฮม<span class="en">Add to Home Screen</span></div>
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l3 3v15H6z"/><circle cx="12" cy="13" r="3"/></svg>ค้นหาในหน้า</div>
+            </div></div>
+            <div class="a2fr" id="a2f-s18-3"><div class="a2add">
+              <span>ยกเลิก</span><span class="ti">เพิ่มไปยังหน้าจอโฮม</span><span class="ok a2hot">เพิ่ม</span>
+            </div></div>
+          </div>
+          <div id="a2g-cr" hidden>
+            <div class="a2fr" id="a2f-cr-1"><div class="a2bar">
+              <span class="a2pill url"><span class="u">github.io</span><span class="a2hot sq"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M8 7l4-4 4 4M6 11v9h12v-9"/></svg></span></span>
+              <span class="a2pill tab">⋯</span>
+            </div></div>
+            <div class="a2fr" id="a2f-cr-2"><div class="a2ml">
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg>เพิ่มบุ๊กมาร์ก</div>
+              <div class="hl"><span class="a2hot sq"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M12 8v8M8 12h8"/></svg></span>เพิ่มไปยังหน้าจอโฮม<span class="en">Add to Home Screen</span></div>
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l3 3v15H6z"/><circle cx="12" cy="13" r="3"/></svg>ค้นหาในหน้า</div>
+            </div></div>
+          </div>
+          <div id="a2g-achrome" hidden>
+            <div class="a2fr" id="a2f-achrome-1"><div class="a2bar">
+              <span class="a2pill url"><span class="u">github.io</span></span>
+              <span class="a2dots a2hot"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="19" r="1.3" fill="currentColor"/></svg></span>
+            </div></div>
+            <div class="a2fr" id="a2f-achrome-2"><div class="a2ml">
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>แท็บใหม่</div>
+              <div class="hl"><span class="a2hot sq"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M12 8v6M9 11h6"/></svg></span>เพิ่มลงในหน้าจอหลัก<span class="en">/ ติดตั้งแอป</span></div>
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg>ดาวน์โหลด</div>
+            </div></div>
+            <div class="a2fr" id="a2f-achrome-3"><div class="a2add">
+              <span class="ti">ติดตั้งแอป? นับสต็อก</span><span>ยกเลิก</span><span class="ok a2hot sq">ติดตั้ง</span>
+            </div></div>
+          </div>
+          <div id="a2g-asamsung" hidden>
+            <div class="a2fr" id="a2f-asamsung-1"><div class="a2bar">
+              <span class="a2dots">‹</span><span class="a2dots">›</span>
+              <span class="a2pill url" style="justify-content:center">⌂</span>
+              <span class="a2dots a2hot"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14"/></svg></span>
+            </div></div>
+            <div class="a2fr" id="a2f-asamsung-2"><div class="a2ml">
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg>บุ๊กมาร์ก</div>
+              <div class="hl"><span class="a2hot sq"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></span>เพิ่มหน้าไปที่<span class="en">Add page to</span></div>
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg>ดาวน์โหลด</div>
+            </div></div>
+            <div class="a2fr" id="a2f-asamsung-3"><div class="a2ml">
+              <div><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg>บุ๊กมาร์ก</div>
+              <div class="hl"><span class="a2hot sq"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M12 8v6M9 11h6"/></svg></span>หน้าจอหลัก<span class="en">Home screen</span></div>
+            </div></div>
+          </div>
+        </div>
+        <div class="a2cap"><b id="a2CapN">1</b><span id="a2CapT"></span></div>
+        <div class="a2nav" id="a2Nav"></div>
+        <div class="a2note" id="a2Note">เปิดจากไอคอนใหม่ แล้วใส่ PIN อีกครั้ง</div>
+      </div>
+      <div id="a2Perm" class="a2note" hidden>ถ้ากดติดตั้งแล้วไม่มีไอคอน: ตั้งค่า → แอป → Chrome → สิทธิ์ → เปิด 'ทางลัดหน้าจอหลัก'</div>
+      <div class="a2pt" id="a2Point" aria-hidden="true" hidden>⬇</div>
+      <div class="a2pu" id="a2PointUp" aria-hidden="true" hidden>⬆</div>
+      <div class="a2btns"><button type="button" id="a2Later">ไว้ทีหลัง</button><button type="button" class="p" id="a2Got">เข้าใจแล้ว</button></div>
     </div>
     <div id="locBar" class="locbar" hidden><label for="locPick">ไปนับที่</label><select id="locPick"></select></div>
     <div id="notes" class="stack"></div>
@@ -526,6 +695,6 @@ body.sheet-open { overflow:hidden; }
   <div class="toast" id="toast" role="status" hidden></div>
 </div>
 <!-- BUMP the ?v= number below every time web/app.js changes (stale-JS guard: GitHub Pages caches 10 min, new HTML + old JS = blank page) -->
-<script src="app.js?v=2026111302"></script>
+<script src="app.js?v=2026111401"></script>
 </body>
 </html>

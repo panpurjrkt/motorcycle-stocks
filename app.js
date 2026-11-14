@@ -21,7 +21,7 @@ var StockLib = (function () {
   L.scanDecision = function (codes, lock, scanned) {
     var n = L.normScan(scanned);
     if (!n) return { action: 'ignore', lock: lock || '' };
-    if (lock) return { action: n === lock ? 'count' : 'wrong', lock: lock };
+    if (lock) return { action: n === lock || (!!codes && codes.indexOf(n) >= 0) ? 'count' : 'wrong', lock: lock };
     if (!codes || !codes.length || codes.indexOf(n) >= 0) return { action: 'count', lock: n };
     return { action: 'wrong', lock: '' };
   };
@@ -52,18 +52,54 @@ var StockLib = (function () {
   L.isLineAndroid = function (ua) { return L.isAndroid(ua) && /\sLine\//.test(str(ua)); };
   L.isOemBrowser = function (ua) { return /MiuiBrowser|HeyTapBrowser|OppoBrowser/.test(str(ua)); };
   L.isOemDevice = function (ua) { return /Xiaomi|Redmi|POCO|OPPO|realme|CPH\d|RMX\d/i.test(str(ua)) || /\bMI /.test(str(ua)); };
-  /** Which one-line hint to show: 'inapp' | 'oem' | '' (iOS and plain Chrome get none). canPrompt = Chrome already offered the install. */
   L.isSamsungBrowser = function (ua) { return /SamsungBrowser/.test(str(ua)); };
-  L.installHelpKind = function (ua, canPrompt) {
-    if (!L.isAndroid(ua)) return '';
-    if (L.isInAppBrowser(ua)) return 'inapp';
-    if (L.isSamsungBrowser(ua) && !canPrompt) return 'samsung';
-    if (L.isOemBrowser(ua) && !canPrompt) return 'oem';
-    return '';
-  };
   /** Chrome on a Xiaomi / OPPO / realme phone: the "Home screen shortcuts" permission is often off, so the icon never appears. */
   L.showPermHint = function (ua) { return L.isAndroid(ua) && L.isOemDevice(ua) && !L.isInAppBrowser(ua) && !L.isOemBrowser(ua); };
-  L.INSTALL_HELP = { inapp: "เปิดในแอปนี้ติดตั้งไม่ได้ — กด ⋮ หรือ ... แล้วเลือก 'เปิดใน Chrome'", oem: 'ให้เปิดลิงก์นี้ใน Chrome แล้วกดปุ่มติดตั้ง', samsung: 'กดเมนู ≡ → เพิ่มหน้าไปที่ → หน้าจอหลัก' };
+
+  /* ---- install help (iPhone / iPad): which picture steps to show. Safari 26 moved the page menu into the bottom address pill, so the steps differ ---- */
+  L.isIosUa = function (ua, touchPoints) { return /iPhone|iPad|iPod/.test(str(ua)) || (/Macintosh/.test(str(ua)) && Number(touchPoints) > 1); };   // iPadOS asks for the desktop site: a Mac UA with a touch screen
+  /** '' (show nothing: not iOS / already installed / LINE has its own banner) | 's26' Safari 26+ (4 pictures) | 's18' Safari before 26 (3) | 'cr' Chrome (2) | 'ipad' Safari on iPad (text) | 'other' Firefox / Edge / other browsers (text: open in Safari) | 'inapp' Facebook / Instagram / Messenger (text: open in Safari) */
+  L.iosInstallKind = function (ua, standalone, touchPoints) {
+    ua = str(ua);
+    if (standalone || !L.isIosUa(ua, touchPoints)) return '';
+    if (/\sLine\//.test(ua)) return '';
+    if (/FBAN|FBAV|FB_IAB|FBIOS|Instagram|Messenger/.test(ua)) return 'inapp';
+    if (/CriOS/.test(ua)) return 'cr';
+    if (/FxiOS|EdgiOS|OPiOS|OPT\/|DuckDuckGo|GSA\//.test(ua)) return 'other';
+    var v = /Version\/(\d+)/.exec(ua);
+    if (!v || !/Safari\//.test(ua)) return 'other';   // a web view with no Safari in its name (mail / chat apps): the way out is Safari
+    if (!/iPhone|iPod/.test(ua)) return 'ipad';        // iPad (own UA or desktop-mode Mac UA): the share button is in the top bar
+    return Number(v[1]) >= 26 ? 's26' : 's18';
+  };
+  /** Android: 'aone' (Chrome / Samsung offered the install: one big button) | 'achrome' (Chrome menu steps) | 'asamsung' (Samsung Internet menu steps) | 'aoem' (Mi / HeyTap / Firefox / Opera / Edge...: open it in Chrome) | 'ainapp' (Facebook / Instagram / Messenger: open it in Chrome) | '' (not Android, installed, or LINE: it already jumps to Chrome by itself). canPrompt = beforeinstallprompt arrived and is unused. */
+  L.androidInstallKind = function (ua, standalone, canPrompt) {
+    ua = str(ua);
+    if (standalone || !L.isAndroid(ua) || /\sLine\//.test(ua)) return '';
+    if (L.isInAppBrowser(ua) || /; wv\)/.test(ua)) return 'ainapp';   // Facebook / Instagram / Messenger, and any other app's web view (TikTok, Shopee, Lazada...: "; wv)")
+    if (L.isSamsungBrowser(ua)) return canPrompt ? 'aone' : 'asamsung';
+    if (L.isOemBrowser(ua) || /Firefox\/|OPR\/|EdgA|UCBrowser|DuckDuckGo|VivoBrowser|HuaweiBrowser|HONORBrowser/.test(ua)) return canPrompt ? 'aone' : 'aoem';
+    return canPrompt ? 'aone' : 'achrome';
+  };
+  /** the pop-up card for any phone: the iOS kind, else the Android kind ('' = no card) */
+  L.installCardKind = function (ua, standalone, touchPoints, canPrompt, androidInstalled) { return L.iosInstallKind(ua, standalone, touchPoints) || L.androidInstallKind(ua, standalone || !!androidInstalled, canPrompt); };   // androidInstalled = the remembered sc5.inst flag (an installed Android app shares its storage with Chrome, so the flag also tells a normal Chrome tab); never used for iOS
+  /** the caption under each picture (one per frame), and the text-only kinds */
+  L.A2HS_STEPS = {
+    s26: ['กด ≡ ในช่องที่อยู่ด้านล่าง', 'กด แชร์', 'กด ⌄ ดูเพิ่มเติม', 'กด เพิ่มไปยังหน้าจอโฮม → กด เพิ่ม'],
+    s18: ['กดปุ่มแชร์ ⬆ ที่แถบด้านล่าง', 'เลื่อนลง แล้วกด เพิ่มไปยังหน้าจอโฮม', 'กด เพิ่ม'],
+    cr: ['กดปุ่มแชร์ ⬆ ทางขวาของแถบที่อยู่ด้านบน', 'กด เพิ่มไปยังหน้าจอโฮม → กด เพิ่ม'],
+    achrome: ['กด ⋮ มุมขวาบน', 'กด เพิ่มลงในหน้าจอหลัก หรือ ติดตั้งแอป', 'กด ติดตั้ง'],
+    asamsung: ['กด ≡ มุมขวาล่าง', 'กด เพิ่มหน้าไปที่', 'กด หน้าจอหลัก → เพิ่ม']
+  };
+  L.A2HS_TEXT = {
+    other: 'เปิดลิงก์นี้ใน Safari แล้วเพิ่มลงหน้าจอโฮม',
+    inapp: "กด ⋯ แล้วเลือก 'เปิดใน Safari'",
+    ipad: "กดปุ่มแชร์ ⬆ ที่แถบด้านบน แล้วเลือก 'เพิ่มไปยังหน้าจอโฮม' → กด เพิ่ม",
+    aoem: 'ให้เปิดลิงก์นี้ใน Chrome แล้วกดติดตั้ง',
+    ainapp: "กด ⋮ แล้วเลือก 'เปิดใน Chrome'"
+  };
+  /** the card title: Android says หน้าจอหลัก, iPhone หน้าจอโฮม */
+  L.A2HS_TITLE = { aone: 'ติดตั้งแอปลงหน้าจอ', achrome: 'เพิ่มแอปลงหน้าจอหลัก', asamsung: 'เพิ่มแอปลงหน้าจอหลัก', aoem: 'เพิ่มแอปลงหน้าจอหลัก', ainapp: 'เพิ่มแอปลงหน้าจอหลัก' };
+  L.A2HS_TITLE_DEFAULT = 'เพิ่มแอปลงหน้าจอโฮม';
 
   L.execUrl = function (x) { return 'https://script.google.com/macros/s/' + x + '/exec'; };
 
@@ -199,7 +235,7 @@ var StockLib = (function () {
   L.dailyCount = function (done, total) { return total > 0 && done >= total ? { full: true } : { full: false, done: done, total: total }; };
 
   /* ---- Settings page (the gear): pure helpers ---- */
-  L.APP_VERSION = '2026111302';   // = the ?v= number on app.js in index.html (bump both together)
+  L.APP_VERSION = '2026111401';   // = the ?v= number on app.js in index.html (bump both together)
   /** '2026111302' -> '2026.11.13' (a 2nd, 3rd... release of the same day shows as '2026.11.13 (2)') */
   L.versionText = function (v) { var m = /^(\d{4})(\d{2})(\d{2})(\d{2})$/.exec(str(v)); if (!m) return str(v); var n = parseInt(m[4], 10); return m[1] + '.' + m[2] + '.' + m[3] + (n > 1 ? ' (' + n + ')' : ''); };
   /** The calendar day in Asia/Bangkok (UTC+7, no summer time) as 'YYYY-MM-DD' for a time in ms. */
@@ -867,7 +903,7 @@ if (typeof document !== 'undefined') (function () {
   var M = null, D = null;            // full-count model / daily page
   var cachedBoot = null;             // the last list this phone kept for this link (shown right after the PIN is typed)
   var verified = false, probing = false, pendingPin = null, paused = false;
-  var Q = [], inflight = false, pumpTimer = null, syncTimer = null, toastTimer = null, lockTimer = null, undoMap = {};
+  var Q = [], gone = Object.create(null), adopted = Object.create(null), vanished = Object.create(null), sendingRid = '', inflight = false, pumpTimer = null, syncTimer = null, toastTimer = null, lockTimer = null, undoMap = {};
   var ST = { q: '', shelf: '', showDone: false, tab: 'first', expanded: false };
   var reloading = false, card = null, notes = [], prefill = {}, draft = {}, loadedAt = 0, noStore = false, offline = false, reloadWhenEmpty = false, lostList = [], offTimer = null;
   var KX = 'sc5.x';                  // the deployment id (execId) this phone has used successfully
@@ -972,7 +1008,7 @@ if (typeof document !== 'undefined') (function () {
     camStop(); PIN = null; padBuf = ''; padBusy = false; verified = false; drawDots();
     clearTimeout(rebootTimer); rebootGen++;   // a pending place-switch reboot must not go out with PIN=null (a wrong try server-side); it resumes after the PIN is accepted
     setMode = set ? 'enter' : ''; firstPin = ''; drawSetMode();
-    $('app').hidden = true; $('pad').hidden = false;
+    $('app').hidden = true; $('pad').hidden = false; drawInstall();
     $('padLinkHint').hidden = !linkFromStore;   // a saved (old) link may be dead: tell the person where to look, nothing else changes
     if (!$('scan').hidden) closeScan();   // closeScan also syncs the back-history entry; any open card is kept as it was
     closeSettings();
@@ -1248,7 +1284,7 @@ if (typeof document !== 'undefined') (function () {
   function goOffline(why) {
     verified = false; offline = true; bioDrawFoot();
     try { acceptBoot(cachedBoot, true); } catch (e) { M = null; D = null; }
-    $('pad').hidden = true; $('app').hidden = false; render();
+    $('pad').hidden = true; $('app').hidden = false; render(); drawInstall();
     clearTimeout(offTimer); offTimer = setTimeout(retryOnline, 15000);
   }
   function retryOnline() {
@@ -1297,7 +1333,7 @@ if (typeof document !== 'undefined') (function () {
       if (!store.set(KL, s)) noStore = true;
     }
     $('pad').hidden = true; $('app').hidden = false;
-    if (noDraw) { $('who').textContent = 'สวัสดี ' + who(); renderBadge(); renderNotes(); redrawLater = true; } else render();
+    if (noDraw) { $('who').textContent = 'สวัสดี ' + who(); renderBadge(); renderNotes(); redrawLater = true; } else render(); drawInstall();
     if (card && !card.unknown && card.mode === 'scan' && !card.camMsg && !card.locked && !$('card').hidden) drawCard();   // the PIN pad stopped the piece camera: bring it back with the card
     if (!unverified && !udTried) { udTried = true; udRestore(); }
     if (!unverified) { bioCancel(); bioStale = false; bioDrawFoot(); bioMaybeOffer(); }
@@ -1419,11 +1455,43 @@ if (typeof document !== 'undefined') (function () {
   }
 
   /* ---------------- queue ---------------- */
+  /** Two windows of the same link (the installed app + a Chrome tab, two tabs from LINE) share one localStorage key for the queue. Entries another window queued are taken over here
+      (never the ones this window already sent or dropped, never a photo that lost its picture); a taken-over entry goes in by its birth time so per-part order (qDue) holds. */
+  function dropQ(rid) { gone[rid] = 1; delete adopted[rid]; L.qDrop(Q, rid); }
+  function mergeStored() {
+    if (!KQ) return false;
+    var raw = ''; try { raw = store.get(KQ); } catch (e) { raw = ''; }
+    if (!raw) return false;
+    var add = L.qParse(raw, T.t).filter(function (e) { return !e.lostPhoto && !gone[e.rid] && L.qIndex(Q, e.rid) < 0; });
+    add.forEach(function (e) {
+      adopted[e.rid] = 1;
+      var i = Q.length; while (i > 0 && Q[i - 1].born > e.born) i--;
+      Q.splice(i, 0, e);
+    });
+    if (add.length) setTimeout(function () { try { renderBadge(); } catch (e) { /* fine */ } pump(); }, 0);
+    return add.length > 0;
+  }
+  /** another window wrote the queue: take over what is new; what this window took over earlier and the other window has since sent / given back is dropped here too (never the one being sent now) */
+  function onQueueStorage(ev) {
+    if (!KQ || (ev && ev.key && ev.key !== KQ)) return;
+    mergeStored();
+    var raw = ''; try { raw = store.get(KQ) || ''; } catch (e) { raw = ''; }
+    var live = Object.create(null); L.qParse(raw, T.t).forEach(function (e) { live[e.rid] = 1; });
+    Object.keys(live).forEach(function (r) { delete vanished[r]; });
+    Q.filter(function (e) { return adopted[e.rid] && !live[e.rid]; }).forEach(function (e) {
+      if (inflight && sendingRid === e.rid) { vanished[e.rid] = 1; return; }   // being sent right now: sent() drops it on any reply that is not ok (the other window has sent it already)
+      dropQ(e.rid); if (e.kind === 'photo') pstore.del(e.rid);
+    });
+    renderBadge(); pump();
+    if (reloadWhenEmpty && !Q.length) reloadNow();
+  }
   function persistQ() {
     if (!KQ) return;
+    mergeStored();
     if (!Q.length) { store.del(KQ); return; }
     if (store.set(KQ, L.qSerialize(Q, true))) { noStore = false; return; }
-    if (!store.set(KQ, L.qSerialize(Q, false))) noStore = true;   // photos too big for the phone's storage, or no storage at all: keep the page open
+    if (!store.set(KQ, L.qSerialize(Q, false))) noStore = true;
+    else noStore = Q.some(function (e) { return e.body && e.body.photo; });   // the pictures were left out of the stored copy: a daily entry still holding one lives only in memory   // photos too big for the phone's storage, or no storage at all: keep the page open
   }
   /** The pictures waiting to be sent: in memory at once, and in IndexedDB (not in the 5 MB localStorage where the queue lives). Without IndexedDB they live in memory only. */
   var pstore = (function () {
@@ -1487,7 +1555,7 @@ if (typeof document !== 'undefined') (function () {
     if (countRid && refusedCounts[countRid]) return;   // its count was already refused: no picture to send
     // the picture is in memory the moment put() is called, so the entry is queued and saved at once (a hanging IndexedDB must not lose it); the store is only the backup
     pstore.put(rid, data, function () {
-      if (countRid && refusedCounts[countRid]) { L.qDrop(Q, rid); pstore.del(rid); persistQ(); renderBadge(); }   // its count was refused while the picture was being stored: never sent
+      if (countRid && refusedCounts[countRid]) { dropQ(rid); pstore.del(rid); persistQ(); renderBadge(); }   // its count was refused while the picture was being stored: never sent
     });
     L.qAdd(Q, L.newEntry('photo', rid, L.photoBody(code, shelf, qty, loc, countRid), 'รูป ' + code, Date.now(), tok));
     persistQ(); renderBadge(); renderNotes(); pump();
@@ -1504,18 +1572,21 @@ if (typeof document !== 'undefined') (function () {
     if (inflight || !Q.length || !verified || paused) return;
     var now = Date.now(), e = L.qDue(Q, now);
     if (!e) { pumpTimer = setTimeout(pump, Math.max(300, L.qNextAt(Q) - now)); return; }
-    if (e.tok && e.tok !== T.t) { L.qDrop(Q, e.rid); if (e.kind === 'photo') pstore.del(e.rid); persistQ(); renderBadge(); pump(); return; }
+    if (e.tok && e.tok !== T.t) { dropQ(e.rid); if (e.kind === 'photo') pstore.del(e.rid); persistQ(); renderBadge(); pump(); return; }
     if (e.kind === 'photo') {
-      inflight = true;
+      inflight = true; sendingRid = e.rid;
       pstore.get(e.rid, function (data, st) {
         if (!data) {
           inflight = false;
-          if (st === 'err' && (photoErrs[e.rid] = photoErrs[e.rid] || Date.now(), Date.now() - photoErrs[e.rid] < PHOTO_ERR_MS)) {   // the storage could not be asked (or hung): the picture may well be there - try again later, counts go on meanwhile
+          var ad = !!adopted[e.rid];   // taken over from another window: its picture may live only in THAT window's memory ('none' here) - the owner sends it and its storage write drops it here (onQueueStorage)
+          if ((st === 'err' || (ad && st === 'none')) && (photoErrs[e.rid] = photoErrs[e.rid] || Date.now(), Date.now() - photoErrs[e.rid] < PHOTO_ERR_MS)) {   // the storage could not be asked (or hung): the picture may well be there - try again later, counts go on meanwhile
             pstore.reset(); L.qRetry(Q, e.rid, Date.now()); persistQ(); renderBadge(); pump(); return;
           }
-          delete photoErrs[e.rid]; pstore.del(e.rid);   // no orphan picture stays in IDB
+          delete photoErrs[e.rid];
+          if (ad) { dropQ(e.rid); renderBadge(); pump(); return; }   // gave up on another window's picture: no note, nothing deleted (it is not ours), its owner still has it
+          pstore.del(e.rid);   // no orphan picture stays in IDB
           // the storage truly has no such picture (browser cleared it, or it kept failing for 5 minutes): the count was saved on its own, only the photo is missing
-          L.qDrop(Q, e.rid); persistQ();
+          dropQ(e.rid); persistQ();
           notes.push({ id: e.rid, kind: 'err', text: 'รูปของ ' + e.body.code + ' หายไป (จำนวนบันทึกแล้ว) กรุณาแจ้งเจ้าของร้านหรือถ่ายรูปส่งให้' });
           renderBadge(); pump(); return;
         }
@@ -1525,7 +1596,7 @@ if (typeof document !== 'undefined') (function () {
       });
       return;
     }   // never send under another link's token
-    inflight = true;
+    inflight = true; sendingRid = e.rid;
     var extra = e.kind === 'fc' ? { rid: e.rid, entry: e.body } : (function () { var x = { rid: e.rid }; Object.keys(e.body).forEach(function (k) { x[k] = e.body[k]; }); return x; })();
     api(e.kind === 'fc' ? 'save' : 'dailySave', extra, function (res) { inflight = false; sent(e, res); }, 45000, e.tok);
   }
@@ -1533,6 +1604,13 @@ if (typeof document !== 'undefined') (function () {
   var reloadedOnce = false, reloadPoll = null;
   function reloadNow() { if (reloadedOnce) return; reloadedOnce = true; clearTimeout(reloadPoll); reloading = true; location.reload(); }
   var waitFrom = 0;
+  /** the old link stays open (its unsent saves are in memory only): put its #hash back (replaceState fires no hashchange) and say why */
+  function keepOldLink() {
+    try { history.replaceState(null, '', location.href.split('#')[0] + '#x=' + T.x + '&t=' + T.t); } catch (e) { /* fine */ }
+    toast('ส่งงานของลิงก์เดิมก่อน', 4000);
+    try { if (!$('pad').hidden) $('padMsg').textContent = OLD_LINK_MSG; } catch (e) { /* the toast said it */ }   // a lasting line on the pad, not only the toast
+  }
+  var OLD_LINK_MSG = 'ลิงก์เดิมยังมีงานรอส่ง ให้เจ้าของลิงก์เดิมใส่รหัส';
   /** the wait for another link's open: ends when the queue is empty; with a DURABLE queue (it is safe in sc5.q.<token>) also after 10 s, at once without signal, or when the sends keep failing - only a memory-only queue is waited for as long as it takes */
   function reloadWatch() {
     clearTimeout(reloadPoll);
@@ -1542,9 +1620,14 @@ if (typeof document !== 'undefined') (function () {
   }
   function sent(e, res) {
     var c = L.classify(res);
+    if (c !== 'ok' && vanished[e.rid]) {   // an entry taken over from another window that the other window has already sent: a refusal / retry / PIN answer here changes nothing (no note, no write)
+      delete vanished[e.rid]; dropQ(e.rid); renderBadge(); pump();
+      if (reloadWhenEmpty && !Q.length) reloadNow();
+      return;
+    }
     if (c === 'ok') {
       if (e.kind !== 'photo') ackSeq++;   // a list built before this moment may not contain this save (doSync / reboot look at it)
-      L.qDrop(Q, e.rid); persistQ(); delete undoMap[e.rid];
+      dropQ(e.rid); persistQ(); delete undoMap[e.rid];
       if (e.kind === 'photo') pstore.del(e.rid);
       if (e.kind === 'fc') delete locCache[e.body.loc || (M || {}).loc];   // a save here: that place's remembered list is no longer true
       if (e.kind === 'daily') { delete draft[e.body.id]; if (redrawLater && D && !card && !editingDaily()) { redrawLater = false; renderDaily(); } }
@@ -1556,15 +1639,17 @@ if (typeof document !== 'undefined') (function () {
       // a picture / count the server keeps failing on (Drive full / blocked / a FAULT every time) is given up after a while; only when THIS reply is itself a fault (a network loss or a busy count never gives back)
       var fault = !!(res && (res.code === 'FAULT' || (e.kind === 'photo' && res.code === 'BUSY')));
       if (fault) { e.firstFail = e.firstFail || Date.now(); e.lastFault = true; } else e.lastFault = false;
-      if (fault && Date.now() - e.firstFail >= L.GIVEUP_MS) { L.qDrop(Q, e.rid); persistQ(); giveBack(e, 'ส่งไม่ได้นานเกินไป'); renderBadge(); pump(); if (reloadWhenEmpty && !Q.length) reloadNow(); return; }
+      if (fault && Date.now() - e.firstFail >= L.GIVEUP_MS) { dropQ(e.rid); persistQ(); giveBack(e, 'ส่งไม่ได้นานเกินไป'); renderBadge(); pump(); if (reloadWhenEmpty && !Q.length) reloadNow(); return; }
       L.qRetry(Q, e.rid, Date.now()); persistQ();
     } else if (c === 'pin') {
-      paused = true;
-      if (reloadWhenEmpty) { if (!noStore && !memOnlyPhotos()) reloadNow(); return; }   // waiting for another link: never show the OLD link's pad (the new person's PIN would burn its tries); the queue is safe in storage, so just start over
-      if (!(res.code === 'SETPIN' && setMode && !$('pad').hidden)) showPad(res.error || '', res.code === 'LOCK', res.code === 'SETPIN');   // (a pad already in set mode keeps the digits being typed)
+      paused = true; var keptOld = false;
+      if (reloadWhenEmpty && (noStore || memOnlyPhotos())) {   // waiting for another link, but the saves live only in memory and the old person's PIN is needed: stop waiting, show the OLD link's pad (the old person types the PIN, the saves go, then the new link can be opened)
+        reloadWhenEmpty = false; clearTimeout(reloadPoll); $('waitq').hidden = true; keptOld = true; keepOldLink();
+      } else if (reloadWhenEmpty) { reloadNow(); return; }   // waiting for another link: never show the OLD link's pad (the new person's PIN would burn its tries); the queue is safe in storage, so just start over
+      if (!(res.code === 'SETPIN' && setMode && !$('pad').hidden)) showPad(keptOld ? OLD_LINK_MSG + (res.error ? ' — ' + res.error : '') : (res.error || ''), res.code === 'LOCK', res.code === 'SETPIN');   // (a pad already in set mode keeps the digits being typed)
       renderBadge(); return;   // the queue stays; after the PIN it goes on
     } else {   // refused (or the mode changed): the item comes back with the reason
-      L.qDrop(Q, e.rid); persistQ(); giveBack(e, res.error || 'บันทึกไม่สำเร็จ');
+      dropQ(e.rid); persistQ(); giveBack(e, res.error || 'บันทึกไม่สำเร็จ');
       if (c === 'mode') reboot();
     }
     renderBadge(); pump();
@@ -1575,7 +1660,7 @@ if (typeof document !== 'undefined') (function () {
     var u = undoMap[e.rid]; delete undoMap[e.rid];
     if (e.kind === 'fc') {
       refusedCounts[e.rid] = 1;
-      Q.filter(function (x) { return x.kind === 'photo' && x.body && x.body.countRid === e.rid; }).forEach(function (x) { L.qDrop(Q, x.rid); pstore.del(x.rid); });   // its count was refused: the photo of it is not sent
+      Q.filter(function (x) { return x.kind === 'photo' && x.body && x.body.countRid === e.rid; }).forEach(function (x) { dropQ(x.rid); pstore.del(x.rid); });   // its count was refused: the photo of it is not sent
       persistQ();
       if (u) L.revertSave(M, u);
       notes.push({ id: e.rid, kind: 'err', text: 'ไม่ได้บันทึก ' + e.label + ' — ' + reason + ' (คืนรายการแล้ว นับใหม่ได้)' });
@@ -1593,6 +1678,7 @@ if (typeof document !== 'undefined') (function () {
     else if (L.qFailing(Q)) { b.hidden = false; b.className = 'qbadge bad'; b.textContent = 'ส่งไม่สำเร็จ ' + Q.length + ' รายการ · ลองใหม่'; }
     else { b.hidden = false; b.className = 'qbadge'; b.textContent = 'กำลังส่ง ' + Q.length; }
     renderNotes();   // the "keep this page open" warning follows the queue
+    drawInstall();   // the iPhone home-screen card shows its "send first" line while the queue is not empty
     if (settingsOpen) drawAbout();
   }
   /** a banner (amber) or error (red) box: icon, text, and an optional text button under it */
@@ -1828,7 +1914,7 @@ if (typeof document !== 'undefined') (function () {
   function udRestore() {
     var d = null; try { d = KUD ? JSON.parse(sessionStorage.getItem(KUD) || 'null') : null; } catch (e) { d = null; }
     if (!d || !d.code || card || !M) { if (d && !M) udClear(); return; }
-    card = { unknown: true, ucode: String(d.code), qty: String(d.qty === undefined ? '' : d.qty), ushelf: String(d.shelf || ''), uloc: String(d.loc || ''), err: 'ต้องถ่ายรูปสินค้าใหม่อีกครั้ง' }; showCard();
+    card = { unknown: true, ucode: String(d.code), qty: String(d.qty === undefined ? '' : d.qty), ushelf: String(d.shelf || ''), uloc: String(d.loc || ''), err: 'ต้องถ่ายรูปสินค้าใหม่อีกครั้ง', restored: true }; showCard();
   }
   function openUnknown(code) { if (switchBlocked()) return; card = { unknown: true, ucode: code, qty: '', ushelf: '', err: '', loc: L.saveLoc(M, pickLoc) }; udSave(); showCard(); }
   function showCard() { hideSug(); closeScan(); closeSettings(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); syncLayer(); drawInstall(); }
@@ -1906,7 +1992,10 @@ if (typeof document !== 'undefined') (function () {
 
     var err = el('div', card.err ? 'msg err' : ''); err.id = 'cardErr'; err.textContent = card.err || ''; box.appendChild(err);
     var save = btn('pbtn', 'บันทึก'); save.id = 'saveBtn';
-    save.addEventListener('click', function () { doSave(readQty()); }); box.appendChild(save);
+    save.addEventListener('click', function () {
+      if (card.mode === 'scan' && !(Number(card.qty) > 0)) { card.err = 'ยังไม่ได้สแกน ถ้าไม่พบเลยให้กด ไม่พบเลย (0)'; drawCard(); return; }   // scan mode with nothing scanned is never a count of 0: only the explicit ไม่พบเลย (0) button saves 0
+      doSave(readQty());
+    }); box.appendChild(save);
     var zero = btn('tbtn c', 'ไม่พบเลย (0)');
     zero.addEventListener('click', function () { doSave(0); }); box.appendChild(zero);
     if (card.mode === 'scan') startPieceCamera();
@@ -2005,6 +2094,15 @@ if (typeof document !== 'undefined') (function () {
 
   /** A count at a branch needs no shelf name: the server uses the branch itself as the place (v7). The main shop still asks for one. */
   function needShelf() { var l = (card && card.unknown && card.uloc) || (M && M.loc); return !(l && l !== 'สนง.ใหญ่'); }
+  /** keep a nowrap line on ONE line: if it still overflows (Android text scaling, a wider fallback font) step its font size down by 0.5 px until it fits or reaches 12 px. Never hides or cuts the text. Runs once per draw. */
+  function fitOneLine(node) {
+    try {
+      if (typeof window.getComputedStyle !== 'function') return;
+      var fs = parseFloat(window.getComputedStyle(node).fontSize), n = 0;
+      if (!(fs > 0)) return;
+      while (node.scrollWidth > node.clientWidth + 0.5 && fs > 12 && n++ < 20) { fs -= 0.5; node.style.fontSize = fs + 'px'; }
+    } catch (e) { /* the clamp() size still applies */ }
+  }
   function drawUnknown(box) {
     box.appendChild(el('h2', 'pname', 'ไม่พบรหัสนี้'));
     var m = el('div', 'msg err'); m.id = 'unknownMsg'; m.appendChild(document.createTextNode('อ่านได้: ')); m.appendChild(el('span', 'code', card.ucode)); m.appendChild(document.createTextNode(' — ไม่มีในรายการอะไหล่')); box.appendChild(m);
@@ -2013,15 +2111,26 @@ if (typeof document !== 'undefined') (function () {
     var q = el('input'); q.type = 'number'; q.inputMode = 'numeric'; q.min = '0'; q.placeholder = '0'; q.value = card.qty; q.addEventListener('input', function () { card.qty = q.value; udSave(); }); c.appendChild(ofield('uqty', 'จำนวนที่นับได้', q));
     var s = el('input'); s.type = 'text'; s.maxLength = 40; s.placeholder = needShelf() ? 'เช่น A-05' : 'ไม่ต้องกรอกก็ได้'; s.value = card.ushelf; s.addEventListener('input', function () { card.ushelf = s.value.trim(); udSave(); }); c.appendChild(ofield('ushelf', needShelf() ? 'ชื่อชั้นวาง' : 'ชื่อชั้นวาง (ถ้ามี)', s));
     box.appendChild(c);
-    // a part that is not in DMS needs a photo of the product before it can be saved
-    var fld = el('div', 'field'); box.appendChild(fld);
-    var pick = el('label', 'fbtn tint wide', ''); pick.appendChild(ic('camera')); var pl = el('span', '', card.photo ? 'ถ่ายใหม่' : 'ถ่ายรูปสินค้า'); pick.appendChild(pl); fld.appendChild(pick);
-    var pf = el('input'); pf.type = 'file'; pf.id = 'uphoto'; pf.accept = 'image/*'; pf.setAttribute('capture', 'environment'); pf.style.position = 'absolute'; pf.style.left = '-9999px'; pick.appendChild(pf);
-    var prev = el('img', 'photo-prev'); prev.alt = ''; fld.appendChild(prev);
-    if (card.photo) { prev.src = card.photo; prev.style.display = 'block'; }
-    else fld.appendChild(el('div', 'hint', 'ต้องถ่ายรูปสินค้าก่อน จึงจะบันทึกได้'));
-    pf.addEventListener('change', function () {
-      var f = pf.files && pf.files[0]; if (!f) return;
+    // a part that is not in DMS needs a photo of the product before it can be saved: its own section (header + badge, one big tile that opens the camera, a one-line warning)
+    var sec = el('div', 'ph'); box.appendChild(sec);
+    var head = el('div', 'phhead'); head.appendChild(el('b', '', 'รูปสินค้า')); head.appendChild(el('span', 'req' + (card.photo ? ' done' : ''), card.photo ? 'ถ่ายแล้ว ✓' : 'จำเป็น')); sec.appendChild(head);
+    var tile = el('label', 'phtile' + (card.photo ? ' has' : '')); sec.appendChild(tile);
+    if (card.photo) {
+      var prev = el('img'); prev.alt = 'รูปสินค้า'; prev.src = card.photo; tile.appendChild(prev);
+      var rt = el('span', 'retake'); rt.appendChild(ic('camera')); rt.appendChild(el('span', '', 'ถ่ายใหม่')); tile.appendChild(rt);
+    } else {
+      var cm = el('span', 'cam'); cm.appendChild(ic('camera', 'big')); tile.appendChild(cm); tile.appendChild(el('span', 'tx', 'แตะเพื่อถ่ายรูปสินค้า'));
+    }
+    var pf = el('input'); pf.type = 'file'; pf.id = 'uphoto'; pf.accept = 'image/*'; pf.setAttribute('capture', 'environment'); pf.style.position = 'absolute'; pf.style.left = '-9999px'; tile.appendChild(pf);
+    var pg = null;   // after a tab reload (a restored draft) the shot just taken may be in the gallery: a second picker WITHOUT capture opens the gallery (a low-memory phone can kill the page every time the camera app opens)
+    if (card.restored && !card.photo) {
+      var gt = el('label', 'phtile alt'); gt.appendChild(el('span', 'tx', 'เลือกรูปจากคลังภาพ')); sec.appendChild(gt);
+      pg = el('input'); pg.type = 'file'; pg.id = 'uphotoPick'; pg.accept = 'image/*'; pg.style.position = 'absolute'; pg.style.left = '-9999px'; gt.appendChild(pg);
+    }
+    var need = null;
+    if (!card.photo && !card.err) { need = el('div', 'need'); need.id = 'photoNeed'; need.appendChild(ic('triangle-alert')); need.appendChild(el('span', '', 'ต้องถ่ายรูปก่อน จึงจะกดบันทึกได้')); sec.appendChild(need); fitOneLine(need); }   // ONE line on every phone (nowrap + a font that shrinks); the error line below says it already after a failed photo
+    function onPhoto(inp) {
+      var f = inp.files && inp.files[0]; if (!f) return;
       card.qty = q.value; card.ushelf = s.value.trim();
       var mine = card;
       shrinkPhoto(f, function (data) {
@@ -2029,9 +2138,11 @@ if (typeof document !== 'undefined') (function () {
         if (data) { card.photo = data; card.err = ''; } else card.err = 'อ่านรูปไม่ได้ ถ่ายรูปใหม่อีกครั้ง';
         drawCard();
       });
-    });
+    }
+    pf.addEventListener('change', function () { onPhoto(pf); });
+    if (pg) pg.addEventListener('change', function () { onPhoto(pg); });
     if (card.err) { var e = el('div', 'msg err', card.err); e.setAttribute('role', 'alert'); box.appendChild(e); }
-    var b = btn('pbtn', 'บันทึกเป็นรหัสไม่รู้จัก'); b.id = 'unknownSave'; b.disabled = !card.photo;
+    var b = btn('pbtn', 'บันทึกเป็นรหัสไม่รู้จัก'); b.id = 'unknownSave'; b.disabled = !card.photo; if (need) b.setAttribute('aria-describedby', 'photoNeed');
     b.addEventListener('click', function () {
       card.qty = q.value; card.ushelf = s.value.trim();
       var bad = L.unknownCheck(card.qty, card.ushelf, needShelf(), card.photo);
@@ -2083,8 +2194,8 @@ if (typeof document !== 'undefined') (function () {
       if (k.kind !== 'plausible') return;                                   // empty
       var code = bestRead(k);
       // a read from the whole-frame / strip views can be a neighbour's label: it must be seen twice (like an unknown code) before a card opens; band reads open at once
-      if (!L.isWideView(view) && L.findPart(M, code) >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(60); lookup(code, true); syncLayer(); return; }
-      if (confirm.add(L.normScan(code))) { camStop(); $('scan').hidden = true; beep(); buzz(60); lookup(code, true); syncLayer(); }   // a plausible code that is not in the list: only after the same code was read twice in a row
+      if (!L.isWideView(view) && L.findPart(M, code) >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(60); lookup(code, true); syncLayer(); drawInstall(); return; }
+      if (confirm.add(L.normScan(code))) { camStop(); $('scan').hidden = true; beep(); buzz(60); lookup(code, true); syncLayer(); drawInstall(); }   // a plausible code that is not in the list: only after the same code was read twice in a row
     }, function (msg) { $('scanNote').textContent = msg; }, { torch: $('scanTorch'), zoom: $('scanZoom'), frame: $('scanVf'), tapFocus: true, onWait: function (on) { $('scanNote').textContent = on ? 'กำลังโหลดตัวอ่าน…' : 'เล็งบาร์โค้ดให้อยู่ในกรอบ'; }, switchBtn: $('scanSwitch'), onSwitch: function () { startScanCam(); }, onIdle: function () { $('scanNote').textContent = 'ถือห่าง 15–20 ซม. ให้บาร์โค้ดอยู่ในกรอบ หรือกดถ่ายรูปแทน'; } });
   }
   var scanRej = L.makeRejectNotes();   // one rejected-read note per distinct raw value per scan session (reset when the sheet opens)
@@ -2762,7 +2873,7 @@ if (typeof document !== 'undefined') (function () {
         if (mySession !== scanSession) { if (!$('scan').hidden && !document.hidden) { photoUi(''); startScanCam(); } return; }   // the sheet was closed / reopened while the picture was being read: drop the result
         if ($('scan').hidden) return;
         var k = text ? L.readClass(text, M) : null;
-        if (k && k.kind === 'plausible') { text = bestRead(k); photoUi(''); camStop(); $('scan').hidden = true; beep(); buzz(60); lookup(text, true); syncLayer(); }
+        if (k && k.kind === 'plausible') { text = bestRead(k); photoUi(''); camStop(); $('scan').hidden = true; beep(); buzz(60); lookup(text, true); syncLayer(); drawInstall(); }
         else { photoUi('fail'); $('scanNote').textContent = text ? (/:\/\/|www\./i.test(text) ? NOT_A_PART : L.rejectMsg(text)) : (why || PHOTO_FAIL); }   // stay on the sheet: the live camera is NOT restarted under the message
       });
     });
@@ -2792,18 +2903,20 @@ if (typeof document !== 'undefined') (function () {
     });
     window.addEventListener('pagehide', camStop);
     window.addEventListener('popstate', onLayerPop);
+    window.addEventListener('storage', onQueueStorage);   // a second window of this link wrote the queue: take over its new entries (see mergeStored)
     // another link opened in this tab (a shared phone): ALWAYS start over with it. If the waiting saves exist only in memory (no storage), nothing may be lost:
     // the app is hidden ("รอส่งข้อมูลให้เสร็จก่อน") until they are sent, then the page reloads.
     // Saves waiting under the OLD link are sent first too when storage works (otherwise they would sit in sc5.q.<oldToken> and nobody would ever send them). Only when they cannot be sent now
     // (no accepted PIN in this page: the pad / offline) the page reloads at once and the start-up note tells the person that counts of another link are still unsent.
     window.addEventListener('hashchange', function () {
-      if (Q.length && (noStore || memOnlyPhotos() || (verified && !paused))) {
+      if (Q.length && !(verified && !paused) && (noStore || memOnlyPhotos())) { keepOldLink(); return; }   // the pad is showing and the waiting saves live only in memory: nothing can be sent now and a reload would lose them - stay on the OLD link (a wait screen here would never end)
+      if (Q.length && verified && !paused) {
         reloadWhenEmpty = true;
         try { bioOfferClose(); } catch (e) { /* fine */ }
         try { if (!$('scan').hidden) closeScan(); } catch (e) { /* fine */ }
         try { closeSettings(); } catch (e) { /* fine */ }
         try { camStop(); backHome(); } catch (e) { /* fine */ }   // no open card / scan sheet / Face ID offer of the OLD link behind the wait screen
-        $('app').hidden = true; $('pad').hidden = true; $('xwarn').hidden = true; $('waitq').hidden = false;
+        $('app').hidden = true; $('pad').hidden = true; $('xwarn').hidden = true; $('waitq').hidden = false; drawInstall();
         waitFrom = Date.now();
         reloadWatch();   // (a path that empties the queue without going through sent() still ends the wait)
         Q.forEach(function (e) { e.next = 0; }); pump();
@@ -2832,31 +2945,115 @@ if (typeof document !== 'undefined') (function () {
     } catch (e) { /* no scroll lock: fine */ }
   }
 
-  /* ---- install button + help (never when already installed) ---- */
-  var installEvt = null, KHELP = 'sc5.helpx';
+  /* ---- "add to home screen" pop-up (iPhone + Android): one card, never when already installed ---- */
+  var installEvt = null;
   function isStandalone() { try { return !!((window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone); } catch (e) { return false; } }
-  function drawInstall() {
-    var ua = navigator.userAgent, box = $('installBox');
-    if (!box) return;
-    if (isStandalone() || !$('card').hidden || !$('scan').hidden || settingsOpen) { box.hidden = true; return; }   // not over a part card / the scan sheet / the Settings page
-    var kind = L.installHelpKind(ua, !!installEvt), dismissed = store.get(KHELP) === '1';
-    $('installBtn').hidden = !installEvt;
-    $('installPerm').hidden = !(installEvt && L.showPermHint(ua));
-    $('installHelp').hidden = !(kind && !dismissed && !L.isLineBrowser(ua));   // LINE shows its own camera banner
-    if (kind) $('installHelpTxt').textContent = L.INSTALL_HELP[kind];
-    box.hidden = $('installBtn').hidden && $('installPerm').hidden && $('installHelp').hidden;
+  /* A small card fixed at the bottom. One picture at a time, moves on by itself every 2.6 s (not with reduced motion), a tap = next. Android Chrome with the install offer: one big button instead. */
+  var KA2 = 'sc5.a2hs', KINST = 'sc5.inst', a2Focus = false, a2Got = false, a2Later = false, a2Installed = false, a2Asking = false, a2I = 0, a2Kind = '', a2Timer = null;
+  function a2Frames(kind) { var out = [], f, i = 1; while ((f = $('a2f-' + kind + '-' + i))) { out.push(f); i++; } return out; }
+  function a2Reduced() { try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { return false; } }
+  function a2Stop() { if (a2Timer) { clearTimeout(a2Timer); a2Timer = null; } }
+  function a2Show(k) {
+    var steps = L.A2HS_STEPS[a2Kind]; if (!steps) return;
+    a2I = k;
+    a2Frames(a2Kind).forEach(function (f, j) { f.classList.toggle('on', j === k); });
+    var dots = $('a2Nav').children; for (var i = 0; i < dots.length; i++) dots[i].classList.toggle('on', i === k);
+    $('a2CapN').textContent = String(k + 1); $('a2CapT').textContent = steps[k];
+    $('a2Point').className = 'a2pt' + (a2Kind === 'asamsung' ? ' r' : '');
+    $('a2Point').hidden = !((a2Kind === 's26' || a2Kind === 'asamsung') && k === 0);   // the bouncing arrow DOWN toward the real ≡ in the bar below (left on iPhone, right on Samsung)
+    $('a2PointUp').hidden = !(a2Kind === 'achrome' && k === 0);                       // Chrome: the arrow points UP at the real ⋮ at the top right
   }
+  function a2Start(n) {
+    if (a2Timer || n < 2 || a2Reduced()) return;
+    a2Timer = setTimeout(function () { a2Timer = null; a2Show((a2I + 1) % n); a2Start(n); }, 2600);   // one step at a time (a chain of timeouts, no interval)
+  }
+  /** a text field has the keyboard: the card would cover what is being typed */
+  function a2Typing() {
+    if (!a2Focus) return false;
+    try { var ae = document.activeElement; if (ae && ae.tagName && !/^(INPUT|SELECT|TEXTAREA)$/i.test(ae.tagName)) return false; } catch (e) { /* trust the flag */ }
+    return true;
+  }
+  /** the page gets bottom padding as tall as the card (its real height + its offset + the safe area + 16 px) so the last row can scroll clear of it; the toast rides above it (--a2top). Cleared when the card is hidden. */
+  function a2Pad(box, on) {
+    try {
+      var b = document.body; if (!b) return;
+      if (b.classList) b.classList.toggle('a2on', on);
+      var st = b.style; if (!st) return;
+      if (!on) { st.paddingBottom = ''; if (st.removeProperty) st.removeProperty('--a2top'); return; }
+      var h = Number(box.offsetHeight) || 300, off = box.classList.contains('a2hi') ? 72 : 12;
+      st.paddingBottom = 'calc(env(safe-area-inset-bottom, 0px) + ' + Math.round(h + off + 16) + 'px)';
+      if (st.setProperty) st.setProperty('--a2top', 'calc(env(safe-area-inset-bottom, 0px) + ' + Math.round(h + off + 10) + 'px)');
+    } catch (e) { /* the card still works */ }
+  }
+  function drawA2hs() {
+    var box = $('a2hs'); if (!box) return;
+    var ua = navigator.userAgent, kind = L.installCardKind(ua, isStandalone(), navigator.maxTouchPoints, !!installEvt, store.get(KINST) === '1'), today = L.bkkDay(Date.now());
+    var show = !!kind && !!T && !$('app').hidden && $('pad').hidden && $('card').hidden && $('scan').hidden && !settingsOpen && !a2Got && !a2Later && !a2Installed && store.get(KA2) !== today && !a2Typing();   // never over the PIN pad, a part card, the scan sheet, Settings, or while the keyboard is up
+    box.hidden = !show;
+    if (!show) { a2Pad(box, false); a2Stop(); return; }
+    var android = kind.charAt(0) === 'a', one = kind === 'aone', steps = L.A2HS_STEPS[kind], queued = !android && Q.length > 0;   // Android installs share the browser's storage: no "send first" line there
+    box.classList.toggle('a2hi', kind === 's26' || kind === 'asamsung');   // Safari 26 / Samsung: a floating bar sits at the bottom
+    $('a2Title').textContent = L.A2HS_TITLE[kind] || L.A2HS_TITLE_DEFAULT;
+    $('a2Queue').hidden = !queued;   // iPhone: unsent counts would be stranded, the home-screen app keeps its own storage
+    $('a2One').hidden = !one;
+    $('a2Text').hidden = queued || one || !!steps;
+    $('a2Vis').hidden = queued || one || !steps;
+    $('a2Note').hidden = android;    // "open the new icon and type the PIN again" is an iPhone thing
+    $('a2Perm').hidden = !(android && (one || kind === 'achrome') && L.showPermHint(ua));
+    $('a2Steps').textContent = steps && !queued ? steps.length + ' ขั้น' : '';
+    if (!steps || queued) {
+      a2Stop(); $('a2Point').hidden = true; $('a2PointUp').hidden = true;
+      if (!queued && !one) $('a2Text').textContent = L.A2HS_TEXT[kind];
+      a2Pad(box, true); return;
+    }
+    if (a2Kind !== kind) {   // first time (or another browser kind): build the dots
+      a2Kind = kind; a2I = 0;
+      var nav = $('a2Nav'); while (nav.firstChild) nav.removeChild(nav.firstChild);
+      steps.forEach(function (_, k) {
+        var b = document.createElement('button'); b.type = 'button'; b.setAttribute('aria-label', 'ขั้นที่ ' + (k + 1));
+        b.addEventListener('click', function () { a2Show(k); a2Stop(); a2Start(steps.length); });
+        nav.appendChild(b);
+      });
+      ['s26', 's18', 'cr', 'achrome', 'asamsung'].forEach(function (g) { var e = $('a2g-' + g); if (e) e.hidden = g !== kind; });
+    }
+    a2Show(a2I); a2Start(steps.length); a2Pad(box, true);
+  }
+  function drawInstall() { try { drawA2hs(); } catch (e) { /* the app works without it */ } }
   function wireInstall() {
-    window.addEventListener('beforeinstallprompt', function (e) { if (e.preventDefault) e.preventDefault(); installEvt = e; drawInstall(); });
-    window.addEventListener('appinstalled', function () { installEvt = null; drawInstall(); });
-    $('installBtn').addEventListener('click', function () {
-      var ev = installEvt; if (!ev || !ev.prompt) return;
+    if (isStandalone()) store.set(KINST, '1');   // running as the installed app: remember it (Android shares this storage with Chrome, so a normal Chrome tab later knows too)
+    window.addEventListener('beforeinstallprompt', function (e) {
+      // keep Chrome's own install offer unless OUR card will really show (not on desktop / LINE / installed, not after ไว้ทีหลัง today or เข้าใจแล้ว)
+      var ours = !!L.installCardKind(navigator.userAgent, isStandalone(), navigator.maxTouchPoints, true, false) && !a2Got && !a2Later && !a2Installed && store.get(KA2) !== L.bkkDay(Date.now());
+      if (ours && e.preventDefault) e.preventDefault();
+      installEvt = e; store.del(KINST);   // an install offer means the app is NOT installed (any more)
+      drawInstall();
+    });
+    window.addEventListener('appinstalled', function () { installEvt = null; a2Installed = true; store.set(KINST, '1'); drawInstall(); });
+    if ($('a2Install')) $('a2Install').addEventListener('click', function () {
+      var ev = installEvt; if (!ev || !ev.prompt || a2Asking) return;
+      a2Asking = true;
+      var over = false, gone = function (ok) {   // once only; a prompt can be used once: accepted -> hide; dismissed / failed -> the menu steps take over
+        if (over) return; over = true; a2Asking = false;
+        if (installEvt === ev) installEvt = null;
+        if (ok) { a2Installed = true; store.set(KINST, '1'); }
+        drawInstall();
+      };
       try {
         var p = ev.prompt();
-        Promise.resolve(ev.userChoice || p).then(function (c) { if (c && c.outcome === 'accepted') { installEvt = null; drawInstall(); } }, function () { /* fine */ });
-      } catch (e) { /* fine */ }
+        if (p && typeof p.then === 'function') p.then(null, function () { gone(false); });   // a refused prompt() must not leave the button frozen
+        Promise.resolve(ev.userChoice || p).then(function (c) { gone(!!(c && c.outcome === 'accepted')); }, function () { gone(false); });
+      } catch (e) { gone(false); }
     });
-    $('installHelpX').addEventListener('click', function () { store.set(KHELP, '1'); drawInstall(); });
+    if ($('a2Ill')) {
+      var a2Next = function () { var st = L.A2HS_STEPS[a2Kind]; if (!st) return; a2Show((a2I + 1) % st.length); a2Stop(); a2Start(st.length); };
+      $('a2Ill').addEventListener('click', a2Next);
+      $('a2Ill').addEventListener('keydown', function (e) { if (e && (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar')) { if (e.preventDefault) e.preventDefault(); a2Next(); } });
+      document.addEventListener('focusin', function (e) { var t = e && e.target; a2Focus = !!(t && /^(INPUT|SELECT|TEXTAREA)$/i.test(t.tagName || '') && !/^(checkbox|radio|button|submit|file|range)$/i.test(t.type || '')); drawInstall(); });
+      document.addEventListener('focusout', function () { a2Focus = false; drawInstall(); });
+      window.addEventListener('resize', function () { drawInstall(); });
+      $('a2Later').addEventListener('click', function () { a2Later = true; store.set(KA2, L.bkkDay(Date.now())); drawInstall(); });   // hidden until tomorrow (Bangkok date); this page load too if storage refuses
+      $('a2Got').addEventListener('click', function () { a2Got = true; drawInstall(); });   // hidden for this page load only
+    }
     try { if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { scope: './' }).catch(function () { /* the app works without it */ }); } catch (e) { /* fine */ }
     drawInstall();
   }
