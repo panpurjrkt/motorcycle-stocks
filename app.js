@@ -235,7 +235,7 @@ var StockLib = (function () {
   L.dailyCount = function (done, total) { return total > 0 && done >= total ? { full: true } : { full: false, done: done, total: total }; };
 
   /* ---- Settings page (the gear): pure helpers ---- */
-  L.APP_VERSION = '2026111402';   // = the ?v= number on app.js in index.html (bump both together)
+  L.APP_VERSION = '2026111404';   // = the ?v= number on app.js in index.html (bump both together)
   /** '2026111302' -> '2026.11.13' (a 2nd, 3rd... release of the same day shows as '2026.11.13 (2)') */
   L.versionText = function (v) { var m = /^(\d{4})(\d{2})(\d{2})(\d{2})$/.exec(str(v)); if (!m) return str(v); var n = parseInt(m[4], 10); return m[1] + '.' + m[2] + '.' + m[3] + (n > 1 ? ' (' + n + ')' : ''); };
   /** The calendar day in Asia/Bangkok (UTC+7, no summer time) as 'YYYY-MM-DD' for a time in ms. */
@@ -896,6 +896,7 @@ var StockLib = (function () {
       var wc = whole(d.crates), wp = whole(d.per), wl = whole(d.loose);
       if (isNaN(wc) || isNaN(wp) || isNaN(wl)) return { ok: false, error: WHOLE_ONLY };
       if ((wc || 0) > 0 && !wp) return { ok: false, error: 'กรุณากรอกจำนวนชิ้นต่อลัง' };
+      if (!wc && wp > 0) return { ok: false, error: 'ไม่มีลัง ให้ลบช่อง ชิ้น/ลัง หรือกรอกจำนวนลัง' };   // (the server's rule: pieces per crate with no crates)
       answer = { crates: str(d.crates), perCrate: str(d.per), loose: str(d.loose) };
       pieces = (wc || 0) * (wp || 0) + (wl || 0);
     } else {
