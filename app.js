@@ -235,7 +235,7 @@ var StockLib = (function () {
   L.dailyCount = function (done, total) { return total > 0 && done >= total ? { full: true } : { full: false, done: done, total: total }; };
 
   /* ---- Settings page (the gear): pure helpers ---- */
-  L.APP_VERSION = '2026111404';   // = the ?v= number on app.js in index.html (bump both together)
+  L.APP_VERSION = '2026111901';   // = the ?v= number on app.js in index.html (bump both together)
   /** '2026111302' -> '2026.11.13' (a 2nd, 3rd... release of the same day shows as '2026.11.13 (2)') */
   L.versionText = function (v) { var m = /^(\d{4})(\d{2})(\d{2})(\d{2})$/.exec(str(v)); if (!m) return str(v); var n = parseInt(m[4], 10); return m[1] + '.' + m[2] + '.' + m[3] + (n > 1 ? ' (' + n + ')' : ''); };
   /** The calendar day in Asia/Bangkok (UTC+7, no summer time) as 'YYYY-MM-DD' for a time in ms. */
@@ -2024,7 +2024,7 @@ if (typeof document !== 'undefined') (function () {
       grp = el('div', 'group'); var srow = el('div', 'item');
       srow.appendChild(ic('map-pin')); srow.appendChild(el('span', 'grow', 'ชั้น ' + card.shelf)); grp.appendChild(srow);
     }
-    if (card.locked && !card.second) { if (grp) box.appendChild(grp); box.appendChild(el('div', 'msg err', 'รายการนี้อยู่ระหว่างนับซ้ำ แจ้งเจ้าของ')); return; }   // under blind recount: no Save button, the owner unlocks it
+    if (card.locked && !card.second) { if (grp) box.appendChild(grp); box.appendChild(el('div', 'msg err', 'รายการนี้กำลังนับซ้ำ แก้ไม่ได้ · เจ้าของปลดล็อกได้ในชีต เมนู ระบบนับสต็อก → ปลดล็อกนับใหม่')); return; }   // under blind recount: no Save button, the owner unlocks it
     if (card.shelf === null) { drawShelfPicker(box); return; }
 
     if (!(card.ext && !needShelf())) {
