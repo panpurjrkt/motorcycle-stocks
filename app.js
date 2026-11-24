@@ -16,7 +16,9 @@ var StockLib = (function () {
   /* ---- code rules: IDENTICAL to Logic.normScan / Logic.scanDecision on the server (a test keeps them the same) ---- */
   L.normScan = function (s) {
     return str(s).replace(/[\u0000-\u001f\u007f​-‍⁠﻿]/g, '').trim()
-      .replace(/^['‘’ʼ`]+/, '').replace(/[\s\xa0]+/g, '').replace(/[\-‐-―−﹘﹣－]/g, '').toUpperCase();
+      .replace(/^['‘’ʼ`]+/, '').replace(/[\s\xa0]+/g, '').replace(/[\-‐-―−﹘﹣－]/g, '')
+      .replace(/[\u0E50-\u0E59\uFF10-\uFF19\uFF21-\uFF3A\uFF41-\uFF5A]/g, function (c) { var x = c.charCodeAt(0); return String.fromCharCode(x <= 0x0E59 ? x - 0x0E50 + 48 : x <= 0xFF19 ? x - 0xFF10 + 48 : x <= 0xFF3A ? x - 0xFF21 + 65 : x - 0xFF41 + 97); })   // Thai digits, full-width digits and letters -> ASCII (the same map as Logic.normScan)
+      .toUpperCase();
   };
   L.scanDecision = function (codes, lock, scanned) {
     var n = L.normScan(scanned);
@@ -235,7 +237,7 @@ var StockLib = (function () {
   L.dailyCount = function (done, total) { return total > 0 && done >= total ? { full: true } : { full: false, done: done, total: total }; };
 
   /* ---- Settings page (the gear): pure helpers ---- */
-  L.APP_VERSION = '2026111901';   // = the ?v= number on app.js in index.html (bump both together)
+  L.APP_VERSION = '2026112402';   // = the ?v= number on app.js in index.html (bump both together)
   /** '2026111302' -> '2026.11.13' (a 2nd, 3rd... release of the same day shows as '2026.11.13 (2)') */
   L.versionText = function (v) { var m = /^(\d{4})(\d{2})(\d{2})(\d{2})$/.exec(str(v)); if (!m) return str(v); var n = parseInt(m[4], 10); return m[1] + '.' + m[2] + '.' + m[3] + (n > 1 ? ' (' + n + ')' : ''); };
   /** The calendar day in Asia/Bangkok (UTC+7, no summer time) as 'YYYY-MM-DD' for a time in ms. */
@@ -251,7 +253,7 @@ var StockLib = (function () {
       loc: str(b.loc), locs: (b.locs || []).map(str),
       sb: L.cleanBoard(b.sb),
       progress: copy(b.progress || { done: 0, total: 0, pct: 0, mine: 0, second: 0 }), parts: [], idIndex: Object.create(null), m2: Object.create(null), m1: Object.create(null),
-      items: [], second: [], byPart: [], locked: Object.create(null), cards: Object.create(null), e2: Object.create(null), e1: Object.create(null), nOwn: 0 };
+      items: [], second: [], byPart: [], cards: Object.create(null), e2: Object.create(null), e1: Object.create(null), nOwn: 0 };
     var P = b.parts || {}, ids = P.id || [], i;
     for (i = 0; i < ids.length; i++) {
       var part = { id: ids[i], code2: str(P.code2[i]), name: str(P.name[i]), c1: str(P.c1[i]), codes: [] }, n2 = L.normScan(part.code2), n1 = L.normScan(part.c1);
@@ -287,7 +289,7 @@ var StockLib = (function () {
         (m.xs[pi] = m.xs[pi] || []).push({ shelf: sh, done: true, on: str((c.on || [])[j]), by: str((c.by || [])[j]) });
       }
     })(b.xs || {});
-    (b.locked || []).forEach(function (p) { m.locked[p] = true; });
+    // (b.locked, the old list of parts under blind recount, is ignored on purpose: a first counter's card must not know about a recount. An old server may still send it.)
     (b.cards || []).forEach(function (c) { m.cards[c.p] = (c.shelves || []).map(function (s) { return { shelf: str(s.shelf), done: !!s.done, doneOn: str(s.doneOn), doneBy: str(s.doneBy) }; }); });
     return m;
   };
@@ -348,14 +350,14 @@ var StockLib = (function () {
 
   /**
    * The part card, the same data the old lookup gave: a part this person must count blind opens as that count (blind cards), otherwise
-   * every DMS shelf with its counted info; `locked` = a blind recount exists, so the first count cannot be redone by staff.
+   * every DMS shelf with its counted info. A part under blind recount is an ordinary counted part here (blind: no lock flag, same picker); the server refuses a redo of a counted shelf with the words of a counted shelf.
    * forceFirst = a tap on a row of the first list (the old page opened that as a plain first count).
    */
   L.cardOf = function (m, p, forceFirst) {
     var part = m.parts[p], base = { p: p, id: part.id, code2: part.code2, name: part.name, codes: part.codes.slice() };
-    if (part.ext) { base.ext = true; base.second = false; base.locked = false; base.shelves = []; base.extDone = part.doneOn ? { doneOn: part.doneOn, doneBy: part.doneBy } : null; return base; }
-    if (!forceFirst && m.cards[p]) { base.second = true; base.locked = false; base.shelves = m.cards[p].map(function (s) { return copy(s); }); return base; }
-    base.second = false; base.locked = !!m.locked[p];
+    if (part.ext) { base.ext = true; base.second = false; base.shelves = []; base.extDone = part.doneOn ? { doneOn: part.doneOn, doneBy: part.doneBy } : null; return base; }
+    if (!forceFirst && m.cards[p]) { base.second = true; base.shelves = m.cards[p].map(function (s) { return copy(s); }); return base; }
+    base.second = false;
     base.shelves = m.byPart[p].map(function (it) { return { shelf: it.shelf, done: it.done, doneOn: it.on, doneBy: it.by }; });
     ((m.xs && m.xs[p]) || []).forEach(function (x) {   // a typed shelf that was counted (not a DMS shelf of this part): its own row, marked extra so a pick saves as otherShelf
       if (base.shelves.some(function (s) { return sameShelf(s.shelf, x.shelf); })) return;   // it IS a DMS shelf of the part: dropped (the DMS shelf shows its own state; the server needs the count in the DMS slot itself)
@@ -367,7 +369,7 @@ var StockLib = (function () {
   L.cardOfSecondRow = function (m, p) {
     if (m.cards[p]) return L.cardOf(m, p, false);
     var part = m.parts[p];
-    return { p: p, id: part.id, code2: part.code2, name: part.name, codes: part.codes.slice(), second: true, locked: false,
+    return { p: p, id: part.id, code2: part.code2, name: part.name, codes: part.codes.slice(), second: true,
       shelves: m.second.filter(function (x) { return x.p === p; }).map(function (it) { return { shelf: it.shelf, done: it.done, doneOn: it.on, doneBy: it.by }; }) };
   };
 
@@ -435,7 +437,9 @@ var StockLib = (function () {
   L.saveLoc = function (m, pick) { return str(m && m.loc) || str(pick); };
   /** '' when an unknown code may be saved, else the Thai reason: quantity / shelf as before, and now the photo of the product. */
   L.unknownCheck = function (qty, shelf, needShelf, photo) {
-    if (qty === '' || (needShelf && !str(shelf).trim()) || isNaN(Number(qty)) || Number(qty) < 0) return needShelf ? 'กรุณาใส่จำนวนและชื่อชั้นวาง' : 'กรุณาใส่จำนวนที่นับได้';
+    var wn = whole(qty);   // the server's rule exactly (digits only, at most 6): '1.5', '1e2', '-1', 1000000 are refused here too
+    if (wn === null || (needShelf && !str(shelf).trim())) return needShelf ? 'กรุณาใส่จำนวนและชื่อชั้นวาง' : 'กรุณาใส่จำนวนที่นับได้';
+    if (wn !== wn) return WHOLE_ONLY;
     if (!photo) return 'ต้องถ่ายรูปสินค้าก่อน จึงจะบันทึกได้';
     return '';
   };
@@ -595,6 +599,9 @@ var StockLib = (function () {
   /** the automatic list refresh waits while counts are waiting to be sent; a waiting (even failing) picture does not hold it back */
   L.syncHeld = function (q, manual) { return !manual && q.some(function (e) { return e.kind !== 'photo'; }); };
   L.qFailing = function (q) { return q.length > 0 && q[0].tries >= 2; };
+  /** the daily 10-minute rule: a daily save that waits in the queue longer than 10 minutes after the photo is refused by the server, so with no signal (or a failing queue) the daily page says so (a warning, never a block) */
+  L.SIG_WARN = 'ไม่มีสัญญาณ รายการนับรายวันต้องส่งภายใน 10 นาทีหลังถ่ายรูป';
+  L.noSignal = function (online, q) { return online === false || L.qFailing(q || []); };
   L.qSerialize = function (q, withPhoto) {
     return JSON.stringify(q.map(function (e) {
       var c = copy(e); c.next = 0;
@@ -889,6 +896,7 @@ var StockLib = (function () {
   /** Checks one daily card before it is queued (the same messages as the old page). d: {crates, per, loose, foundAt, photo, lastModified, now} (qty only for a plain entry) */
   var WHOLE_ONLY = 'กรอกจำนวนเป็นเลขจำนวนเต็มเท่านั้น';
   function whole(v) { var t = str(v).trim(); return t === '' ? null : (/^\d{1,6}$/.test(t) ? parseInt(t, 10) : NaN); }   // the server's rule exactly (Logic.gs wholeNumber): digits only, at most 6, no sign / decimal point
+  L.whole = whole; L.WHOLE_ONLY = WHOLE_ONLY;
   L.dailyCheck = function (d) {
     var answer, pieces;
     if (d.qty === undefined || d.qty === null || d.crates !== undefined || d.per !== undefined || d.loose !== undefined) {   // the page always sends the crates x per-crate + loose entry (the plain qty form is only kept for the checks)
@@ -1089,6 +1097,7 @@ if (typeof document !== 'undefined') (function () {
     padBusy = true; PIN = typed; bioSourced = false; typedByHand = true; $('padMsg').textContent = 'กำลังบันทึกรหัส…';
     api('setpin', {}, function (res) {
       if (res && res.ok === true) { setMode = ''; firstPin = ''; drawSetMode(); padBuf = ''; drawDots(); submitPin(typed); return; }   // saved: boot as logged in with it
+      if (res && res.code === 'PIN') { PIN = null; showPad('รหัสถูกตั้งไว้แล้ว ใส่รหัสที่ตั้งไว้', false); return; }   // a code was already set (another phone, or an earlier try): the ordinary pad; NO boot with the code just typed (a wrong try on the server)
       if (res && (res.code === 'BAD' || res.code === 'SETPIN')) { PIN = null; firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); padBusy = false; $('padMsg').textContent = res.error || 'บันทึกรหัสไม่สำเร็จ ลองใหม่'; return; }   // a plain no: choose again
       // the reply was lost (network / timeout / busy) or says PIN needed (the save may have landed, or another phone set one): try to go in with the code just typed first
       setMode = ''; firstPin = ''; drawSetMode(); $('padMsg').textContent = 'กำลังตรวจรหัส…';
@@ -1380,8 +1389,8 @@ if (typeof document !== 'undefined') (function () {
     }
     $('pad').hidden = true; $('app').hidden = false;
     if (noDraw) { $('who').textContent = 'สวัสดี ' + who(); renderBadge(); renderNotes(); redrawLater = true; } else render(); drawInstall();
-    if (card && !card.unknown && card.mode === 'scan' && !card.camMsg && !card.locked && !$('card').hidden) drawCard();   // the PIN pad stopped the piece camera: bring it back with the card
-    if (!unverified && !udTried) { udTried = true; udRestore(); }
+    if (card && !card.unknown && card.mode === 'scan' && !card.camMsg && !$('card').hidden) drawCard();   // the PIN pad stopped the piece camera: bring it back with the card
+    if (!unverified && !udTried) { udTried = true; udRestore(); fdRestore(); ddRestore(); }
     if (!unverified) { bioCancel(); bioStale = false; bioDrawFoot(); bioMaybeOffer(); }
     if (!unverified) { schedSync(); pump(); if (!geoStarted) { geoStarted = true; geoCheck(); } else geoFlush(); }
   }
@@ -1703,13 +1712,14 @@ if (typeof document !== 'undefined') (function () {
   }
   function giveBack(e, reason) {
     if (e.kind === 'photo') { pstore.del(e.rid); notes.push({ id: e.rid, kind: 'err', text: 'ส่งรูปของ ' + e.body.code + ' ไม่สำเร็จ — ' + reason + ' ' + (e.body.countRid && Q.some(function (x) { return x.rid === e.body.countRid; }) ? '(จำนวนยังรอส่งอยู่)' : '(จำนวนบันทึกแล้ว)') + ' กรุณาแจ้งเจ้าของร้าน' }); renderNotes(); return; }
-    var u = undoMap[e.rid]; delete undoMap[e.rid];
+    var u = undoMap[e.rid], resync = false; delete undoMap[e.rid];
     if (e.kind === 'fc') {
       refusedCounts[e.rid] = 1;
       Q.filter(function (x) { return x.kind === 'photo' && x.body && x.body.countRid === e.rid; }).forEach(function (x) { dropQ(x.rid); pstore.del(x.rid); });   // its count was refused: the photo of it is not sent
       persistQ();
       if (u) L.revertSave(M, u);
-      notes.push({ id: e.rid, kind: 'err', text: 'ไม่ได้บันทึก ' + e.label + ' — ' + reason + ' (คืนรายการแล้ว นับใหม่ได้)' });
+      notes.push({ id: e.rid, kind: 'err', text: 'ไม่ได้บันทึก ' + e.label + ' — ' + reason + (/แก้ไม่ได้|^นับแล้ว /.test(reason) ? '' : ' (คืนรายการแล้ว นับใหม่ได้)') });   // a refused redo of a counted shelf ("นับแล้ว <date> โดย <name>"; the old server said แก้ไม่ได้): the item is NOT free to count again
+      resync = true;   // the lists are fetched again below (the shelf list shows what the sheet holds)
     } else {
       var why = L.dailyRefusal(reason, Date.now() - e.born);
       if (why.needPhoto && draft[e.body.id]) { draft[e.body.id].photo = null; draft[e.body.id].lastModified = 0; }   // a photo refusal (too old, 10-minute rule) reads "รูปเก่าเกิน 10 นาที กรุณาถ่ายรูปใหม่"
@@ -1717,6 +1727,12 @@ if (typeof document !== 'undefined') (function () {
       notes.push({ id: e.rid, kind: 'err', text: 'ไม่ได้ส่ง ' + e.label + ' — ' + why.text + (why.needPhoto ? '' : ' (คืนรายการแล้ว กรอกและถ่ายรูปใหม่ได้)') });
     }
     render();
+    if (resync) doSync(true, true);
+  }
+  function sigOnline() { try { return navigator.onLine; } catch (e) { return true; } }
+  /** show / hide the no-signal warning of every daily card on the page (the queue or the connection changed) */
+  function sigUpdate() {
+    try { var w = document.querySelectorAll('.sigwarn'), on = L.noSignal(sigOnline(), Q), i; for (i = 0; i < w.length; i++) { w[i].textContent = L.SIG_WARN; w[i].hidden = !on; } } catch (e) { /* ignore */ }
   }
   function renderBadge() {
     var b = $('qbadge');
@@ -1724,6 +1740,7 @@ if (typeof document !== 'undefined') (function () {
     else if (L.qFailing(Q)) { b.hidden = false; b.className = 'qbadge bad'; b.textContent = 'ส่งไม่สำเร็จ ' + Q.length + ' รายการ · ลองใหม่'; }
     else { b.hidden = false; b.className = 'qbadge'; b.textContent = 'กำลังส่ง ' + Q.length; }
     renderNotes();   // the "keep this page open" warning follows the queue
+    sigUpdate();
     drawInstall();   // the iPhone home-screen card shows its "send first" line while the queue is not empty
     if (settingsOpen) drawAbout();
   }
@@ -1949,7 +1966,7 @@ if (typeof document !== 'undefined') (function () {
     if (card.ext) { card.otherOpen = needShelf(); if (!needShelf()) { card.shelf = ''; card.other = true; } }   // a part from another location: a branch needs no shelf (the branch itself), the main shop asks for a name
     card.mode = 'type'; card.qty = 0; card.lock = ''; card.warn = ''; card.err = ''; card.camMsg = ''; card.leave = false; card.unknown = false;
     card.loc = L.saveLoc(M, pickLoc);   // the place is fixed when the card opens, not read again at save time
-    showCard(); focusQty();
+    udClear(); showCard(); focusQty();
   }
   /** the card opens in type mode: put the cursor in the quantity box (iOS may refuse to open the keyboard - harmless) */
   function focusQty() { try { var q = $('qtyIn'); if (q && card && card.mode === 'type') q.focus(); } catch (e) { /* ignore */ } }
@@ -1962,9 +1979,71 @@ if (typeof document !== 'undefined') (function () {
     if (!d || !d.code || card || !M) { if (d && !M) udClear(); return; }
     card = { unknown: true, ucode: String(d.code), qty: String(d.qty === undefined ? '' : d.qty), ushelf: String(d.shelf || ''), uloc: String(d.loc || ''), err: 'ต้องถ่ายรูปสินค้าใหม่อีกครั้ง', restored: true }; showCard();
   }
-  function openUnknown(code) { if (switchBlocked()) return; card = { unknown: true, ucode: code, qty: '', ushelf: '', err: '', loc: L.saveLoc(M, pickLoc) }; udSave(); showCard(); }
+  function openUnknown(code) { if (switchBlocked()) return; card = { unknown: true, ucode: code, qty: '', ushelf: '', err: '', loc: L.saveLoc(M, pickLoc) }; fdClear(); udSave(); showCard(); }
+  /* ---- drafts of the open full-count card (KFD) and of the daily cards (KDD) in the tab session store, like the unknown-code draft above ----
+   * An Android tab can be killed while the system camera is open (the daily ถ่ายรูป button, the per-piece photo fallback) or when the person switches apps: what was typed / scanned comes back
+   * after the PIN is accepted. Only what the counter typed or scanned is kept (a part id, the shelf they picked, the quantity they entered, the place, the date) and NEVER a photo. Every access is in try/catch (the store may be missing). */
+  var KFD = T ? 'sc5.fd.' + T.t : '', KDD = T ? 'sc5.dd.' + T.t : '', ddTried = false;
+  function str(v) { return v === null || v === undefined ? '' : String(v); }
+  function ssRead(k) { try { return k ? JSON.parse(sessionStorage.getItem(k) || 'null') : null; } catch (e) { return null; } }
+  function ssWrite(k, v) { try { if (k) sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ignore */ } }
+  function ssDrop(k) { try { if (k) sessionStorage.removeItem(k); } catch (e) { /* ignore */ } }
+  function fdSave() {
+    if (!KFD || !card || card.unknown) return;
+    ssWrite(KFD, { d: today(), id: card.ext ? '' : str(card.id), ext: !!card.ext, code2: card.ext ? str(card.code2) : '', second: !!card.second, shelf: card.shelf === null ? null : str(card.shelf), other: !!card.other, otherOpen: !!card.otherOpen,
+      otherDraft: str(card.otherDraft), mode: card.mode === 'scan' ? 'scan' : 'type', qty: Number(card.qty) > 0 ? Math.floor(Number(card.qty)) : 0, lock: str(card.lock), loc: str(card.loc || L.saveLoc(M, pickLoc)) });
+  }
+  function fdClear() { ssDrop(KFD); }
+  /** after the PIN: the part card that was open comes back with what was typed / scanned (only when the same part still exists in the same place's list on the same day) */
+  function fdRestore() {
+    var d = ssRead(KFD);
+    if (!d) return;
+    if (card || !M) { if (!M) fdClear(); return; }
+    var p = -1, c;
+    if (d.d !== today() || (d.loc && M.loc && d.loc !== M.loc)) { fdClear(); return; }
+    if (d.ext) { p = L.findPart(M, d.code2); if (p < 0 || !M.parts[p].ext) p = -1; }
+    else if (d.id && d.id in M.idIndex) p = M.idIndex[d.id];
+    if (p < 0) { fdClear(); return; }
+    c = d.ext ? L.cardOf(M, p, false) : (d.second ? L.cardOfSecondRow(M, p) : L.cardOf(M, p, true));
+    if (!!c.second !== !!d.second || (!c.ext && !c.shelves.length)) { fdClear(); return; }   // the part changed meaning meanwhile (a blind recount appeared / went): start from the list again
+    c.shelf = d.shelf === null ? null : str(d.shelf); c.other = !!d.other; c.otherOpen = !!d.otherOpen; c.otherDraft = str(d.otherDraft);
+    if (c.shelf !== null && c.shelf !== '' && !c.other && !c.ext && !shelfIn(c, c.shelf)) c.shelf = null;   // a DMS shelf that is no longer in the list: pick again
+    c.mode = d.mode === 'scan' ? 'scan' : 'type'; c.qty = Number(d.qty) > 0 ? Math.floor(Number(d.qty)) : 0; c.lock = c.mode === 'scan' ? str(d.lock) : '';
+    c.warn = ''; c.err = ''; c.camMsg = ''; c.leave = false; c.unknown = false; c.loc = str(d.loc) || L.saveLoc(M, pickLoc);
+    card = c; showCard(); toast('เปิดรายการที่ค้างไว้กลับมาให้แล้ว', 3500);
+  }
+  function shelfIn(c, name) { for (var i = 0; i < c.shelves.length; i++) if (c.shelves[i].shelf === name) return true; return false; }
+  /** every daily card with typed text (never the photo) as {itemId: {c, p, l, f}}, under today's date; items already queued are left out (they are sent) */
+  function ddSave() {
+    if (!KDD || !ddTried || !D) return;
+    var out = {}, any = false, id, st;
+    for (id in draft) {
+      st = draft[id];
+      if (!st || !(st.crates || st.per || st.loose || st.foundAt)) continue;
+      if (Q.some(function (e) { return e.kind === 'daily' && e.body && e.body.id === id; })) continue;
+      out[id] = { c: str(st.crates), p: str(st.per), l: str(st.loose), f: str(st.foundAt) }; any = true;
+    }
+    if (any) ssWrite(KDD, { d: today(), items: out }); else ssDrop(KDD);
+  }
+  /** after the PIN: the typed boxes of the daily cards that were open come back (the photo never does: the person takes it again, and the 10-minute rule stays) */
+  function ddRestore() {
+    ddTried = true;
+    var d = ssRead(KDD), any = false, st, o, busy = editingDaily();
+    if (!d) return;
+    if (!D || d.d !== today() || !d.items || typeof d.items !== 'object') { ssDrop(KDD); return; }
+    (D.items || []).forEach(function (it) {
+      o = d.items[it.id];
+      if (!o || it.done) return;
+      st = draft[it.id];
+      if (st && (st.crates || st.per || st.loose || st.foundAt || st.photo)) return;   // the person already typed here: theirs wins
+      if (!st) st = draft[it.id] = { photo: null, lastModified: 0, crates: '', per: '', loose: '', foundAt: '' };
+      st.crates = str(o.c); st.per = str(o.p); st.loose = str(o.l); st.foundAt = str(o.f); any = true;
+    });
+    if (any && !card && !busy) renderDaily(); else if (any) redrawLater = true;   // (a half-typed card / an open card: drawn later, the values are already in the drafts)
+    ddSave();
+  }
   function showCard() { hideSug(); closeScan(); closeSettings(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); syncLayer(); drawInstall(); }
-  function backHome() { camStop(); card = null; udClear(); $('card').hidden = true; $('home').hidden = false; if (M) { renderProg(); renderChips(); renderList(); } else if (D) renderDaily(); renderNotes(); syncLayer(); geoFlush(); drawInstall(); }
+  function backHome() { camStop(); card = null; udClear(); fdClear(); $('card').hidden = true; $('home').hidden = false; if (M) { renderProg(); renderChips(); renderList(); } else if (D) renderDaily(); renderNotes(); syncLayer(); geoFlush(); drawInstall(); }
   /* Android back button / back gesture: while the card or the scan sheet is open, one history entry (same URL, state object only) sits on top, so "back" closes that layer
      instead of leaving the app. Closing a layer by hand removes the entry again; the swallow flag ignores the popstate that this causes. */
   var layerPushed = false, layerSwallow = false, settingsOpen = false;
@@ -2011,6 +2090,7 @@ if (typeof document !== 'undefined') (function () {
     });
     nav.appendChild(back); box.appendChild(nav);
     if (card.unknown) { drawUnknown(box); return; }
+    fdSave();   // every redraw of a part card (shelf / mode picked, scanner back) refreshes its draft
 
     var head = el('div', 'phead'), tile = el('div', 'tile'), ht = el('div', 'grow');
     tile.appendChild(ic('package')); head.appendChild(tile);
@@ -2019,12 +2099,11 @@ if (typeof document !== 'undefined') (function () {
 
     var grp = null;
     if (card.ext) box.appendChild(noteBox('note', 'info', 'อะไหล่จากสาขาอื่น/สำนักงานใหญ่ นับที่นี่ได้ตามปกติ'));
-    if (!card.ext && !card.second && !card.locked) { var cnt = countedNote(); if (cnt) box.appendChild(cnt); }   // 2+ counted shelves of this part: who counted which (never a quantity)
+    if (!card.ext && !card.second) { var cnt = countedNote(); if (cnt) box.appendChild(cnt); }   // 2+ counted shelves of this part: who counted which (never a quantity)
     if (card.shelf !== null && card.shelf !== '') {
       grp = el('div', 'group'); var srow = el('div', 'item');
       srow.appendChild(ic('map-pin')); srow.appendChild(el('span', 'grow', 'ชั้น ' + card.shelf)); grp.appendChild(srow);
     }
-    if (card.locked && !card.second) { if (grp) box.appendChild(grp); box.appendChild(el('div', 'msg err', 'รายการนี้กำลังนับซ้ำ แก้ไม่ได้ · เจ้าของปลดล็อกได้ในชีต เมนู ระบบนับสต็อก → ปลดล็อกนับใหม่')); return; }   // under blind recount: no Save button, the owner unlocks it
     if (card.shelf === null) { drawShelfPicker(box); return; }
 
     if (!(card.ext && !needShelf())) {
@@ -2073,8 +2152,9 @@ if (typeof document !== 'undefined') (function () {
     var o = btn('shelfpick item'), ot = el('div', 'two');
     ot.appendChild(el('div', 'l1', 'ชั้นอื่น (ไม่มีในรายการ)')); ot.appendChild(el('div', 'l2', 'ต้องพิมพ์ชื่อชั้นวาง')); o.appendChild(ot);
     var form = el('div', 'panel fldwrap'); form.hidden = !card.otherOpen;
-    var inp = el('input'); inp.type = 'text'; inp.maxLength = 40; inp.placeholder = 'เช่น A-05';
-    o.addEventListener('click', function () { card.otherOpen = true; form.hidden = false; inp.focus(); });
+    var inp = el('input'); inp.type = 'text'; inp.maxLength = 40; inp.placeholder = 'เช่น A-05'; inp.value = str(card.otherDraft);
+    inp.addEventListener('input', function () { card.otherDraft = inp.value; fdSave(); });
+    o.addEventListener('click', function () { card.otherOpen = true; form.hidden = false; inp.focus(); fdSave(); });
     grp.appendChild(o); box.appendChild(grp);
     form.appendChild(ofield('otherShelf', 'ชื่อชั้นวาง', inp));
     var msg = el('div'); msg.id = 'otherErr'; form.appendChild(msg);
@@ -2095,9 +2175,9 @@ if (typeof document !== 'undefined') (function () {
     var minus = btn('step'); minus.appendChild(ic('minus')); minus.setAttribute('aria-label', 'ลด');
     var inp = el('input'); inp.type = 'number'; inp.inputMode = 'numeric'; inp.min = '0'; inp.step = '1'; inp.id = 'qtyIn'; inp.placeholder = '0'; inp.value = card.qty ? String(card.qty) : '';
     var plus = btn('step'); plus.appendChild(ic('plus')); plus.setAttribute('aria-label', 'เพิ่ม');
-    minus.addEventListener('click', function () { inp.value = String(Math.max(0, (parseInt(inp.value, 10) || 0) - 1)); card.qty = +inp.value; });
-    plus.addEventListener('click', function () { inp.value = String((parseInt(inp.value, 10) || 0) + 1); card.qty = +inp.value; });
-    inp.addEventListener('input', function () { card.qty = Math.max(0, parseInt(inp.value, 10) || 0); });
+    minus.addEventListener('click', function () { inp.value = String(Math.max(0, (parseInt(inp.value, 10) || 0) - 1)); card.qty = +inp.value; fdSave(); });
+    plus.addEventListener('click', function () { inp.value = String((parseInt(inp.value, 10) || 0) + 1); card.qty = +inp.value; fdSave(); });
+    inp.addEventListener('input', function () { card.qty = Math.max(0, parseInt(inp.value, 10) || 0); fdSave(); });
     var ow = el('div', 'of'); ow.appendChild(inp);
     row.appendChild(minus); row.appendChild(ow); row.appendChild(plus); box.appendChild(row);
   }
@@ -2127,7 +2207,7 @@ if (typeof document !== 'undefined') (function () {
     var r = btn('fbtn', 'ล้าง'); r.addEventListener('click', function () { card.qty = 0; card.lock = ''; card.warn = ''; setBig(); });
     g.appendChild(m); g.appendChild(r); box.appendChild(g);
   }
-  function setBig() { var b = $('bigqty'); if (b) b.textContent = String(card.qty); var w = $('pieceWarn'); if (w) { w.textContent = card.warn; w.className = card.warn ? 'msg err' : ''; } }
+  function setBig() { fdSave(); var b = $('bigqty'); if (b) b.textContent = String(card.qty); var w = $('pieceWarn'); if (w) { w.textContent = card.warn; w.className = card.warn ? 'msg err' : ''; } }
   function pieceWarn(t) { if (!card) return; card.warn = t; setBig(); }
 
   function startPieceCamera() {
@@ -2220,7 +2300,10 @@ if (typeof document !== 'undefined') (function () {
   /** Save = optimistic: the item leaves the list at once, the card closes, the request goes through the queue. */
   function doSave(q) {
     if (!verified) { toast('ยังบันทึกไม่ได้ รอให้ระบบตรวจรหัสก่อน'); return; }
-    if (q === null || q === '' || isNaN(Number(q)) || Number(q) < 0) { card.err = 'กรุณาใส่จำนวนที่นับได้ (ไม่พบเลยให้กด "ไม่พบเลย")'; drawCard(); return; }
+    var wq = L.whole(q);   // the server's rule exactly: '1.5', '1e2', '-1', 1000000 never get queued
+    if (wq === null) { card.err = 'กรุณาใส่จำนวนที่นับได้ (ไม่พบเลยให้กด "ไม่พบเลย")'; drawCard(); return; }
+    if (wq !== wq) { card.err = L.WHOLE_ONLY; drawCard(); return; }
+    q = wq;
     var body = card.ext ? L.unknownBody(card.code2 || card.codes[0], card.shelf, q, card.loc || L.saveLoc(M, pickLoc), card.mode) : L.fcBody(card, q, card.mode, card.loc || L.saveLoc(M, pickLoc));   // a part from another location is saved exactly like an unknown code (the server stores the same row)
     enqueue('fc', body, card.name + (card.shelf ? ' ชั้น ' + card.shelf : ''));
     toast('บันทึกแล้ว');
@@ -2873,18 +2956,19 @@ if (typeof document !== 'undefined') (function () {
     crates.value = st.crates; per.value = st.per; loose.value = st.loose;
     total = el('div', 'total', 'รวม 0 ชิ้น'); c.appendChild(total);
     var recalc = function () { total.textContent = 'รวม ' + ((+crates.value || 0) * (+per.value || 0) + (+loose.value || 0)) + ' ชิ้น'; };
-    [crates, per, loose].forEach(function (i) { i.addEventListener('input', function () { st.crates = crates.value; st.per = per.value; st.loose = loose.value; recalc(); }); }); recalc();
+    [crates, per, loose].forEach(function (i) { i.addEventListener('input', function () { st.crates = crates.value; st.per = per.value; st.loose = loose.value; recalc(); ddSave(); }); }); recalc();
 
     var fld = el('div', 'field'); c.appendChild(fld);
     var pick = el('label', 'fbtn tint wide', ''); pick.appendChild(ic('camera')); var pl = el('span', '', 'ถ่ายรูป'); pick.appendChild(pl); fld.appendChild(pick);
     var file = el('input'); file.type = 'file'; file.accept = 'image/*'; file.setAttribute('capture', 'environment'); file.style.position = 'absolute'; file.style.left = '-9999px'; pick.appendChild(file);
     var prev = el('img', 'photo-prev'); prev.alt = ''; fld.appendChild(prev);
-    var foundAt = el('input'); foundAt.type = 'text'; foundAt.maxLength = 80; foundAt.value = st.foundAt; foundAt.addEventListener('input', function () { st.foundAt = foundAt.value; });
+    var foundAt = el('input'); foundAt.type = 'text'; foundAt.maxLength = 80; foundAt.value = st.foundAt; foundAt.addEventListener('input', function () { st.foundAt = foundAt.value; ddSave(); });
     foundAt.setAttribute('aria-label', 'เจอที่ไหนบ้าง');
     var fof = el('div', 'of'); fof.appendChild(foundAt); foundAt.placeholder = 'เจอที่ไหนบ้าง (จำเป็นถ้านับได้มากกว่า 0)'; c.appendChild(fof);
     var err = el('div', 'msg err'); err.hidden = true; c.appendChild(err);
     function showErr(t) { err.textContent = t; err.hidden = !t; }
     if (pf.err) showErr(pf.err);
+    var sig = el('div', 'msg err sigwarn'); sig.setAttribute('role', 'alert'); sig.textContent = L.SIG_WARN; sig.hidden = !L.noSignal(sigOnline(), Q); c.appendChild(sig);   // above the send button: no signal / failing queue
     var send = btn('pbtn', 'ส่งรายการนี้'); c.appendChild(send);
     if (st.photo) { prev.src = st.photo; prev.style.display = 'block'; pl.textContent = 'ถ่ายใหม่'; }
     function resetPhoto() { st.photo = null; st.lastModified = 0; prev.style.display = 'none'; pl.textContent = 'ถ่ายรูป'; file.value = ''; }
@@ -2907,6 +2991,7 @@ if (typeof document !== 'undefined') (function () {
       if (!chk.ok) { if (chk.resetPhoto) resetPhoto(); showErr(chk.error); return; }
       delete prefill[it.id];
       enqueue('daily', L.dailyBody(it.id, chk.answer, foundAt.value, st.photo, st.lastModified, now), it.name);
+      ddSave();   // (the item is queued now: its draft leaves the session store)
       scrollNext = true; toast('บันทึกแล้ว'); renderDaily();
     });
     return c;
@@ -2958,7 +3043,7 @@ if (typeof document !== 'undefined') (function () {
       geoCheck();
       if (!$('scan').hidden && pickerOpen) { pump(); setTimeout(function () { if (pickerOpen) { pickerOpen = false; resumeScanCam(); } }, 2500); return; }   // back from the photo picker: the picture's change event follows (do not restart the camera under the decode); if none comes (cancel not reported), restart anyway
       if (!$('scan').hidden) { if ($('scanFail').hidden) startScanCam(); pump(); return; }   // the viewfinder went black while the page was hidden (not while a photo failure message waits for the person; startScanCam itself refuses while a photo is being read)
-      if (card) { if (!card.unknown && card.mode === 'scan' && !card.camMsg && !card.locked) drawCard(); return; }
+      if (card) { if (!card.unknown && card.mode === 'scan' && !card.camMsg) drawCard(); return; }
       if (verified && Date.now() - loadedAt > 60000) doSync(false);
       pump();
     });
@@ -2985,7 +3070,8 @@ if (typeof document !== 'undefined') (function () {
       }
       reloading = true; location.reload();
     });
-    window.addEventListener('online', function () { Q.forEach(function (e) { e.next = 0; }); pump(); });
+    window.addEventListener('online', function () { Q.forEach(function (e) { e.next = 0; }); pump(); sigUpdate(); });
+    window.addEventListener('offline', sigUpdate);
     window.addEventListener('beforeunload', function (ev) { if (Q.length && !reloading) { ev.preventDefault(); ev.returnValue = ''; return ''; } });
   }
 
