@@ -1,11 +1,7 @@
 /*
  * VPS Yamaha stock count - staff app (one static page, no build step, no secrets).
- *
- * Part 1 (StockLib) is pure: no DOM, no network, no storage objects of its own. web-test.js loads it in Node, and the page uses the same code.
- * Part 2 is the page itself (PIN pad, lists, cards, camera, save queue); it only runs where `document` exists.
- *
- * The link is  <this page>#x=<execId>&t=<token>  : everything after # stays on the phone (GitHub never sees it).
- * The app talks to the Apps Script web app (/exec) with POST + text/plain (a CORS "simple request": no preflight).
+ * Part 1 (StockLib) is pure (no DOM, no network): web-test.js loads it in Node and the page uses the same code. Part 2 is the page; it only runs where `document` exists.
+ * The link is <this page>#x=<execId>&t=<token>: everything after # stays on the phone. The app talks to the Apps Script web app (/exec) with POST + text/plain (a CORS "simple request": no preflight).
  */
 var StockLib = (function () {
   'use strict';
@@ -14,8 +10,11 @@ var StockLib = (function () {
   function copy(o) { var r = {}; Object.keys(o).forEach(function (k) { r[k] = o[k]; }); return r; }
 
   /* ---- code rules: IDENTICAL to Logic.normScan / Logic.scanDecision on the server (a test keeps them the same) ---- */
+  var PLAIN_CODE = /^[A-Z0-9-]+$/;   // the usual shape of a code: only dashes need to go (the full rule below gives the same answer, in one step instead of six)
   L.normScan = function (s) {
-    return str(s).replace(/[\u0000-\u001f\u007f​-‍⁠﻿]/g, '').trim()
+    s = str(s);
+    if (PLAIN_CODE.test(s)) return s.indexOf('-') < 0 ? s : s.replace(/-/g, '');
+    return s.replace(/[\u0000-\u001f\u007f​-‍⁠﻿]/g, '').trim()
       .replace(/^['‘’ʼ`]+/, '').replace(/[\s\xa0]+/g, '').replace(/[\-‐-―−﹘﹣－]/g, '')
       .replace(/[\u0E50-\u0E59\uFF10-\uFF19\uFF21-\uFF3A\uFF41-\uFF5A]/g, function (c) { var x = c.charCodeAt(0); return String.fromCharCode(x <= 0x0E59 ? x - 0x0E50 + 48 : x <= 0xFF19 ? x - 0xFF10 + 48 : x <= 0xFF3A ? x - 0xFF21 + 65 : x - 0xFF41 + 97); })   // Thai digits, full-width digits and letters -> ASCII (the same map as Logic.normScan)
       .toUpperCase();
@@ -60,7 +59,7 @@ var StockLib = (function () {
 
   /* ---- install help (iPhone / iPad): which picture steps to show. Safari 26 moved the page menu into the bottom address pill, so the steps differ ---- */
   L.isIosUa = function (ua, touchPoints) { return /iPhone|iPad|iPod/.test(str(ua)) || (/Macintosh/.test(str(ua)) && Number(touchPoints) > 1); };   // iPadOS asks for the desktop site: a Mac UA with a touch screen
-  /** '' (show nothing: not iOS / already installed / LINE has its own banner) | 's26' Safari 26+ (4 pictures) | 's18' Safari before 26 (3) | 'cr' Chrome (2) | 'ipad' Safari on iPad (text) | 'other' Firefox / Edge / other browsers (text: open in Safari) | 'inapp' Facebook / Instagram / Messenger (text: open in Safari) */
+  /** '' (nothing: not iOS / installed / LINE) | 's26' Safari 26+ | 's18' Safari before 26 | 'cr' Chrome | 'ipad' Safari on iPad | 'other' / 'inapp' (text: open in Safari) */
   L.iosInstallKind = function (ua, standalone, touchPoints) {
     ua = str(ua);
     if (standalone || !L.isIosUa(ua, touchPoints)) return '';
@@ -73,7 +72,7 @@ var StockLib = (function () {
     if (!/iPhone|iPod/.test(ua)) return 'ipad';        // iPad (own UA or desktop-mode Mac UA): the share button is in the top bar
     return Number(v[1]) >= 26 ? 's26' : 's18';
   };
-  /** Android: 'aone' (Chrome / Samsung offered the install: one big button) | 'achrome' (Chrome menu steps) | 'asamsung' (Samsung Internet menu steps) | 'aoem' (Mi / HeyTap / Firefox / Opera / Edge...: open it in Chrome) | 'ainapp' (Facebook / Instagram / Messenger: open it in Chrome) | '' (not Android, installed, or LINE: it already jumps to Chrome by itself). canPrompt = beforeinstallprompt arrived and is unused. */
+  /** Android: 'aone' (install offered: one big button) | 'achrome' / 'asamsung' (menu steps) | 'aoem' / 'ainapp' (open it in Chrome) | '' (not Android, installed, or LINE, which jumps to Chrome itself). canPrompt = beforeinstallprompt arrived and is unused. */
   L.androidInstallKind = function (ua, standalone, canPrompt) {
     ua = str(ua);
     if (standalone || !L.isAndroid(ua) || /\sLine\//.test(ua)) return '';
@@ -175,8 +174,7 @@ var StockLib = (function () {
     }
     return out;
   };
-  /** true when this phone's storage holds another person's UNSENT counts (sc5.q.<other>, not empty) or another person's scan record (sc5.bio.<other>): a shared phone - no biometrics there.
-   *  Leftovers (a list cache, a declined mark, a draft of an old link) do not count: they are tidied by L.staleTokenKeys. */
+  /** true when the storage holds another person's UNSENT counts (sc5.q.<other>) or scan record (sc5.bio.<other>): a shared phone, no biometrics. Leftovers (list cache, declined mark, draft) do not count; L.staleTokenKeys tidies them. */
   L.otherTokenData = function (keys, token, get) {
     var list = keys || [], i, m;
     for (i = 0; i < list.length; i++) { m = /^sc5\.bio\.(.+)$/.exec(str(list[i])); if (m && m[1] !== token) return true; }
@@ -193,7 +191,7 @@ var StockLib = (function () {
   };
   /** 'Face ID' for iPhone / iPad, otherwise the fingerprint (Android) */
   L.bioLabel = function (ua) { return /iPhone|iPad|iPod/.test(str(ua)) ? 'Face ID' : 'ลายนิ้วมือ'; };
-  /** The stored unlock record (JSON text) -> {v:1,id,salt,iv,ct} (all base64url), or null when it is missing / damaged. Holds NO PIN: ct is the PIN encrypted with a key only the phone's scan can produce. */
+  /** The stored unlock record (JSON text) -> {v:1,id,salt,iv,ct} (base64url), or null when missing / damaged. Holds NO PIN: ct is the PIN encrypted with a key only the phone's scan can make. */
   L.bioParse = function (text) {
     var o = null;
     try { o = text ? JSON.parse(text) : null; } catch (e) { return null; }
@@ -211,8 +209,8 @@ var StockLib = (function () {
     return {
       get: function (k) { try { var s = ls(); return s ? s.getItem(k) : null; } catch (e) { return null; } },
       set: function (k, v) { try { var s = ls(); if (!s) return false; s.setItem(k, v); return true; } catch (e) { return false; } },
-      del: function (k) { try { var s = ls(); if (s) s.removeItem(k); } catch (e) { /* ignore */ } },
-      keys: function () { var out = []; try { var s = ls(); if (s && typeof s.length === 'number' && typeof s.key === 'function') for (var i = 0; i < s.length; i++) out.push(s.key(i)); } catch (e) { /* ignore */ } return out; }
+      del: function (k) { try { var s = ls(); if (s) s.removeItem(k); } catch (e) {} },
+      keys: function () { var out = []; try { var s = ls(); if (s && typeof s.length === 'number' && typeof s.key === 'function') for (var i = 0; i < s.length; i++) out.push(s.key(i)); } catch (e) {} return out; }
     };
   };
 
@@ -224,8 +222,7 @@ var StockLib = (function () {
   };
   /** The person's own place on the board, as the server worked it out: {rank, items} or null when they have not counted yet. */
   L.boardMe = function (sb) { return sb && sb.me ? { rank: sb.me.rank, items: sb.me.items } : null; };
-  /** ใครนับแล้วบ้าง on the DAILY page: the daily boot reply's sb {mode:'daily', rows:[{rank,name,placesText,done,total}], me:{rank,done,total}|null} -> the same shape cleaned, or null when it is absent / not a daily board.
-   *  Rows that are not objects are skipped; counts are clamped to whole numbers >= 0. The page hides the card when there are no rows. */
+  /** The DAILY page's board: reply sb {mode:'daily', rows:[{rank,name,placesText,done,total}], me} -> cleaned (counts clamped to whole numbers >= 0, non-object rows skipped), or null when absent / not a daily board. */
   L.cleanBoardDaily = function (sb) {
     if (!sb || typeof sb !== 'object' || sb.mode !== 'daily' || !Array.isArray(sb.rows)) return null;
     var cnt = function (v) { var n = Math.floor(Number(v)); return n > 0 && isFinite(n) ? n : 0; };
@@ -237,7 +234,16 @@ var StockLib = (function () {
   L.dailyCount = function (done, total) { return total > 0 && done >= total ? { full: true } : { full: false, done: done, total: total }; };
 
   /* ---- Settings page (the gear): pure helpers ---- */
-  L.APP_VERSION = '2026112402';   // = the ?v= number on app.js in index.html (bump both together)
+  L.APP_VERSION = '2026112404';   // = the ?v= number on app.js in index.html (bump both together)
+  /** The ?v= number in the address of a script (null when there is none): '.../app.js?v=2026112403' -> '2026112403'. */
+  L.srcVersion = function (src) { var m = /[?&]v=([^&#]*)/.exec(str(src)); return m ? m[1] : null; };
+  /** After a deploy the CDN can serve an OLD index.html with the NEW app.js (or the reverse) for about 10 minutes: true when this script's own ?v= differs from the version inside it. No ?v= (or no script found) = nothing to compare = false. */
+  L.versionMismatch = function (appVersion, src) { var v = L.srcVersion(src); return v !== null && v !== '' && v !== str(appVersion); };
+  /** true when the stored stamp {pair, time} says a reload for this pair of versions was made less than `ms` ago (a damaged / future / other-pair stamp = false) */
+  L.recentReload = function (raw, pair, now, ms) {
+    var o = null; try { o = JSON.parse(str(raw)); } catch (e) { o = null; }
+    return !!o && typeof o === 'object' && o.pair === pair && typeof o.time === 'number' && now - o.time >= 0 && now - o.time < ms;
+  };
   /** '2026111302' -> '2026.11.13' (a 2nd, 3rd... release of the same day shows as '2026.11.13 (2)') */
   L.versionText = function (v) { var m = /^(\d{4})(\d{2})(\d{2})(\d{2})$/.exec(str(v)); if (!m) return str(v); var n = parseInt(m[4], 10); return m[1] + '.' + m[2] + '.' + m[3] + (n > 1 ? ' (' + n + ')' : ''); };
   /** The calendar day in Asia/Bangkok (UTC+7, no summer time) as 'YYYY-MM-DD' for a time in ms. */
@@ -254,17 +260,18 @@ var StockLib = (function () {
       sb: L.cleanBoard(b.sb),
       progress: copy(b.progress || { done: 0, total: 0, pct: 0, mine: 0, second: 0 }), parts: [], idIndex: Object.create(null), m2: Object.create(null), m1: Object.create(null),
       items: [], second: [], byPart: [], cards: Object.create(null), e2: Object.create(null), e1: Object.create(null), nOwn: 0 };
-    var P = b.parts || {}, ids = P.id || [], i;
+    var P = b.parts || {}, ids = P.id || [], i, n2s = [], lns = [];   // n2s / lns: each own part's normalised code2 and lower-case name, made once so a keystroke in the search box does not redo them for every row
     for (i = 0; i < ids.length; i++) {
       var part = { id: ids[i], code2: str(P.code2[i]), name: str(P.name[i]), c1: str(P.c1[i]), codes: [] }, n2 = L.normScan(part.code2), n1 = L.normScan(part.c1);
       if (n2) part.codes.push(n2);
       if (n1 && part.codes.indexOf(n1) < 0) part.codes.push(n1);
+      n2s.push(n2); lns.push(part.name.toLowerCase());
       m.parts.push(part); m.idIndex[part.id] = i; m.byPart.push([]);
       if (n2 && !(n2 in m.m2)) m.m2[n2] = i;
       if (n1 && !(n1 in m.m1)) m.m1[n1] = i;
     }
-    m.nOwn = m.parts.length;
-    // shop parts that are not on this location's list ([code2, code1, name]; "done" shows only from this phone's own saves): found by code like any part, counted here on an extra shelf (the save goes the unknown-code way)
+    m.nOwn = m.parts.length; hidden(m, 'n2s', n2s); hidden(m, 'lns', lns);
+    // shop parts not on this location's list ([code2, code1, name]): found by code like any part, counted on an extra shelf (the save goes the unknown-code way); "done" shows only from this phone's own saves
     (b.ext || []).forEach(function (x) {
       var e = { id: '', code2: str(x[0]), name: str(x[2]), c1: str(x[1]), codes: [], ext: true, doneOn: '', doneBy: '' }, a2 = L.normScan(e.code2), a1 = L.normScan(e.c1), i2 = m.parts.length;
       if (!a2) return;
@@ -304,9 +311,7 @@ var StockLib = (function () {
     if (n in m.e1) return m.e1[n];
     return -1;
   };
-  /** Thai-made Yamaha labels: the label says BF6-E7632-00 but the barcode reads BF6E7632000 (11 chars). When the exact read is not a part, try: (1) padded with zeros to 12 chars (the DMS code1 form),
-   *  (2) an 11-12 char read whose tail after char 10 is all zeros cut to its first 10 chars (the code2 form without dashes). Only an exact hit of the list counts; two variants that hit DIFFERENT parts = ambiguous = -1.
-   *  Returns the part index or -1. An exact hit is NOT handled here (findPart does that first). */
+  /** Thai-made labels: the label says BF6-E7632-00 but the barcode reads BF6E7632000 (11 chars). When the exact read is not a part, try (1) zero-padded to 12 chars (the DMS code1 form), (2) an 11-12 char read whose tail after char 10 is all zeros, cut to 10 chars (code2 without dashes). Only an exact hit of the list counts; variants that hit DIFFERENT parts = ambiguous = -1. Returns the part index or -1 (an exact hit is findPart's job). */
   L.findPartVariant = function (m, text) {
     var n = L.normScan(text);
     if (!n || !/^[A-Z0-9]+$/.test(n) || L.findPart(m, n) >= 0) return -1;
@@ -319,15 +324,16 @@ var StockLib = (function () {
   L.findPartLoose = function (m, text) { var p = L.findPart(m, text); return p >= 0 ? p : L.findPartVariant(m, text); };
 
 
-  /**
-   * Suggestions while a code is typed. Returns { list, shown, total }: `list` = up to `max` (default 8) part indexes whose normalised code2 or code1 (part.codes, the data
-   * findPart uses; every part, counted or not) START with the typed text first, then those that CONTAIN it; each group is in order of the code that matched (then file
-   * order). `shown[i]` = the code that matched for list[i], as written in the data (what the row displays). `total` = how many parts match in all (more than the list when capped).
-   * The text goes through normScan (dashes, spaces, case do not matter); fewer than 2 normalised characters -> nothing.
-   */
+  /** Suggestions while a code is typed -> { list, shown, total }: up to `max` (default 8) part indexes whose normalised code2 / code1 START with the typed text, then those that CONTAIN it (each group ordered by matched code, then file order); shown[i] = the matched code as written in the data; total = all matches. Fewer than 2 normalised characters -> nothing. */
   L.suggestMatches = function (m, text, max) {
-    var n = L.normScan(text), lim = max === undefined ? 8 : max, starts = [], inside = [], i, j, none = { list: [], shown: [], total: 0 };
+    var n = L.normScan(text), lim = max === undefined ? 8 : max, starts = [], inside = [], total = 0, i, j, none = { list: [], shown: [], total: 0 };
     if (n.length < 2 || !m || !m.parts) return none;
+    function byCode(a, b) { return a.code < b.code ? -1 : a.code > b.code ? 1 : a.p - b.p; }
+    function keep(arr, hit) {   // only the first `lim` of each group are ever shown: keep just those, in order, instead of sorting every match
+      if (arr.length >= lim && byCode(hit, arr[arr.length - 1]) > 0) return;
+      var at = arr.length; while (at > 0 && byCode(hit, arr[at - 1]) < 0) at--;
+      arr.splice(at, 0, hit); if (arr.length > lim) arr.pop();
+    }
     for (i = 0; i < m.parts.length; i++) {
       var part = m.parts[i], codes = part.codes, hit = null, k;
       for (j = 0; j < codes.length; j++) {
@@ -335,24 +341,17 @@ var StockLib = (function () {
         if (k === 0) { hit = { p: i, code: codes[j], at: 0 }; break; }
         if (k > 0 && !hit) hit = { p: i, code: codes[j], at: k };
       }
-      if (hit) (hit.at === 0 ? starts : inside).push(hit);
+      if (hit) { total++; if (lim > 0) keep(hit.at === 0 ? starts : inside, hit); }
     }
-    function byCode(a, b) { return a.code < b.code ? -1 : a.code > b.code ? 1 : a.p - b.p; }
-    var all = starts.sort(byCode).concat(inside.sort(byCode)), cut = lim > 0 ? all.slice(0, lim) : [];
+    var cut = starts.concat(inside).slice(0, lim > 0 ? lim : 0);
     function written(h) {   // the matched code as the data spells it (code2, else code1 without its leading apostrophe)
       var pt = m.parts[h.p];
       return L.normScan(pt.code2) === h.code ? pt.code2 : str(pt.c1).replace(/^['\u2018\u2019\u02bc`]+/, '');
     }
-    return { list: cut.map(function (h) { return h.p; }), shown: cut.map(written), total: all.length };
+    return { list: cut.map(function (h) { return h.p; }), shown: cut.map(written), total: total };
   };
-  /** Just the part indexes of L.suggestMatches. */
-  L.suggestCodes = function (m, text, max) { return L.suggestMatches(m, text, max).list; };
 
-  /**
-   * The part card, the same data the old lookup gave: a part this person must count blind opens as that count (blind cards), otherwise
-   * every DMS shelf with its counted info. A part under blind recount is an ordinary counted part here (blind: no lock flag, same picker); the server refuses a redo of a counted shelf with the words of a counted shelf.
-   * forceFirst = a tap on a row of the first list (the old page opened that as a plain first count).
-   */
+  /** The part card: a part this person must count blind opens as that count (blind cards), otherwise every DMS shelf with its counted info. A part under blind recount is an ordinary counted part here (no lock flag; the server refuses a redo of a counted shelf). forceFirst = a tap on a row of the first list. */
   L.cardOf = function (m, p, forceFirst) {
     var part = m.parts[p], base = { p: p, id: part.id, code2: part.code2, name: part.name, codes: part.codes.slice() };
     if (part.ext) { base.ext = true; base.second = false; base.shelves = []; base.extDone = part.doneOn ? { doneOn: part.doneOn, doneBy: part.doneBy } : null; return base; }
@@ -373,14 +372,15 @@ var StockLib = (function () {
       shelves: m.second.filter(function (x) { return x.p === p; }).map(function (it) { return { shelf: it.shelf, done: it.done, doneOn: it.on, doneBy: it.by }; }) };
   };
 
-  /** Items of a list that pass the filter (the old page's rules); at most f.max rows, `hidden` = how many more matched. */
+  /** Items of a list that pass the filter; at most f.max rows, `hidden` = how many more matched. */
   L.filterItems = function (m, list, f) {
-    var qn = L.normScan(f.q), raw = str(f.q).trim().toLowerCase(), rows = [], hidden = 0, max = f.max || 150;
+    var qn = L.normScan(f.q), raw = str(f.q).trim().toLowerCase(), rows = [], hidden = 0, max = f.max || 150, un = 0, n2s = m.n2s, lns = m.lns;
     for (var i = 0; i < list.length; i++) {
       var it = list[i], part = m.parts[it.p];
       if (it.done && !f.showDone) continue;
       if (f.shelf && it.shelf !== f.shelf) continue;
-      if (raw && L.normScan(part.code2).indexOf(qn) < 0 && part.name.toLowerCase().indexOf(raw) < 0) continue;
+      if (raw && (n2s ? n2s[it.p] : L.normScan(part.code2)).indexOf(qn) < 0 && (lns ? lns[it.p] : part.name.toLowerCase()).indexOf(raw) < 0) continue;
+      if (!it.done) un++;
       rows.push(it);
     }
     // counted rows (green) go to the bottom of their own shelf group; the order inside each part stays (list is already sorted by shelf, then code)
@@ -398,7 +398,7 @@ var StockLib = (function () {
       rows.forEach(function (r) { if (!r.done) { if (nu++ < max) cut.push(r); } else if (quota > 0) { quota--; cut.push(r); } });
       hidden = rows.length - cut.length; rows = cut;
     }
-    return { rows: rows, hidden: hidden };
+    return { rows: rows, hidden: hidden, un: un };   // un = how many of the matches are not counted yet (all of them, before the cap)
   };
   L.shelvesOf = function (m, list) {
     var seen = Object.create(null), out = [];
@@ -406,7 +406,7 @@ var StockLib = (function () {
     return out;
   };
 
-  /** The request body of a full-count save (the same fields the old page sent). */
+  /** The request body of a full-count save. */
   L.fcBody = function (card, qty, mode, loc) {
     var b = { id: card.id, qty: String(qty), mode: mode === 'scan' ? 'scan' : 'type' };
     if (loc) b.loc = loc;   // a roaming person's chosen location (everybody else's is decided by the server)
@@ -424,7 +424,7 @@ var StockLib = (function () {
     return out.length > 1 ? out : [];
   };
 
-  /* ---- v9: photo of a product that is not in DMS ---- */
+  /* ---- photo of a product that is not in DMS ---- */
   L.PHOTO_PLANS = [[1280, 0.7], [1280, 0.55], [1024, 0.5], [800, 0.45]];   // [longest edge, JPEG quality] tried in turn until the picture is small enough
   L.PHOTO_MAX_CHARS = 340000;                                               // data-URL length of about 250 KB
   L.photoPlan = function (w, h, i) {
@@ -433,7 +433,7 @@ var StockLib = (function () {
   };
   /** The queue body of a photo (the picture itself is kept apart, in IndexedDB / memory, under the entry's request id). */
   L.photoBody = function (code, shelf, qty, loc, countRid) { var b = { code: str(code), shelf: str(shelf), qty: String(qty) }; if (loc) b.loc = loc; if (countRid) b.countRid = str(countRid); return b; };
-  /** The body loc of a save: always the place of the list the item came from (m.loc), else the picked place; '' only when neither is known. The server accepts it only when it is the person's own place / a roaming pick. */
+  /** The body loc of a save: the place of the list the item came from (m.loc), else the picked place, '' when neither is known. The server accepts it only for the person's own place / a roaming pick. */
   L.saveLoc = function (m, pick) { return str(m && m.loc) || str(pick); };
   /** '' when an unknown code may be saved, else the Thai reason: quantity / shelf as before, and now the photo of the product. */
   L.unknownCheck = function (qty, shelf, needShelf, photo) {
@@ -444,7 +444,7 @@ var StockLib = (function () {
     return '';
   };
 
-  /* ---- v9: GPS pick of the location for a roaming counter ---- */
+  /* ---- GPS pick of the location for a roaming counter ---- */
   L.GEO_RADIUS_M = 300; L.GEO_MAX_ACC_M = 200; L.GEO_MARGIN_M = 150;
   /** Distance in metres between two lat/lng points (haversine). */
   L.geoMeters = function (a, b, c, d) {
@@ -452,10 +452,7 @@ var StockLib = (function () {
     var x = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(a * r) * Math.cos(c * r) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
     return 2 * R * Math.asin(Math.min(1, Math.sqrt(x)));
   };
-  /**
-   * The place GPS names, or ''. geo = {name: [lat, lng]} of ALL active places. The nearest place overall must be one of `choices` (the person's selectable places),
-   * distance + accuracy must be within the radius, and the second-nearest place must be at least `margin` metres farther. A broken or too-poor fix says nothing.
-   */
+  /** The place GPS names, or ''. geo = {name: [lat, lng]} of ALL active places. The nearest place must be one of `choices`, within the radius (distance + accuracy), and the second-nearest at least `margin` metres farther; a broken or poor fix says nothing. */
   L.nearestLoc = function (fix, geo, choices, radius, maxAcc, margin) {
     radius = radius || L.GEO_RADIUS_M; maxAcc = maxAcc || L.GEO_MAX_ACC_M; margin = margin === undefined ? L.GEO_MARGIN_M : margin;
     if (!fix || !isFinite(fix.lat) || !isFinite(fix.lng) || Math.abs(fix.lat) > 90 || Math.abs(fix.lng) > 180) return '';
@@ -474,11 +471,7 @@ var StockLib = (function () {
     if (all.length > 1 && all[1].d - first.d < margin) return '';
     return first.n;
   };
-  /**
-   * What a GPS reading means. prev = the place GPS named last time (''), current = the place the list is on now, near = the place named now ('' = none).
-   * Switch only when GPS names a place that is not the current one AND is not the place it already named before (then the person chose the other one by hand, and that wins).
-   * Returns {place (the new "last GPS place"), switchTo ('' = stay)}.
-   */
+  /** What a GPS reading means (prev = place GPS named last time, current = the list's place, near = place named now). Switch only to a place that is not the current one AND not the one GPS already named before (then the person chose by hand, and that wins). Returns {place, switchTo ('' = stay)}. */
   L.geoDecide = function (prev, current, near) {
     if (!near) return { place: '', switchTo: '' };
     if (near === current || near === prev) return { place: near, switchTo: '' };
@@ -494,8 +487,7 @@ var StockLib = (function () {
     var x = str(a).trim().toLowerCase(), y = str(b).trim().toLowerCase();
     return x === y || (L.normScan(a) !== '' && L.normScan(a) === L.normScan(b));
   }
-  L.sameShelf = sameShelf;   // (the page's shelf picker uses the same rule)
-  /** The server's shelf match: an EXACT name first (trim, case-insensitive), then the normalised sameShelf rule - so 'A-1' and 'A1' stay two shelves. arr = objects, key = the name field; returns the item or null. */
+  /** The server's shelf match: an EXACT name first (trim, case-insensitive), then the normalised sameShelf rule, so 'A-1' and 'A1' stay two shelves. Returns the item of arr (name field = key) or null. */
   L.findShelf = function (arr, key, want) {
     var w = str(want).trim().toLowerCase(), i;
     for (i = 0; i < arr.length; i++) if (str(arr[i][key]).trim().toLowerCase() === w) return arr[i];
@@ -505,10 +497,7 @@ var StockLib = (function () {
   function hidden(o, k, v) { Object.defineProperty(o, k, { value: v, writable: true, enumerable: false, configurable: true }); }   // bookkeeping that must not show in JSON / comparisons
   function pct(p) { p.pct = p.total ? Math.round(p.done / p.total * 100) : 0; }
 
-  /**
-   * The optimistic effect of a queued save on the lists: the item turns "counted" (so it leaves the open list) and the progress moves.
-   * Returns an undo record (or null when there is nothing to change). who = this counter, today = the Thai date text.
-   */
+  /** The optimistic effect of a queued save: the item turns "counted" (leaves the open list) and the progress moves. Returns an undo record or null. */
   L.applySave = function (m, body, who, today) {
     if (!m || !body) return null;
     if (body.unknown) {   // a count of a shop part from another location (the card of such a part): it shows as counted on the card; a truly unknown code changes nothing
@@ -522,7 +511,7 @@ var StockLib = (function () {
     if (p === undefined) return null;
     var want = body.otherShelf !== undefined && str(body.otherShelf).trim() ? body.otherShelf : body.shelf, list = body.second ? m.second : m.byPart[p], hit = null;
     hit = L.findShelf(list.filter(function (x) { return x.p === p; }), 'shelf', want);
-    var undo = { item: hit, done: hit ? hit.done : false, on: hit ? hit.on : '', by: hit ? hit.by : '', progress: copy(m.progress), dDone: 0, dMine: 0, card: null };
+    var undo = { item: hit, done: hit ? hit.done : false, on: hit ? hit.on : '', by: hit ? hit.by : '', dDone: 0, dMine: 0, card: null };
     if (body.second && m.cards[p]) {   // the blind card shows the shelf as counted too
       var bs = L.findShelf(m.cards[p], 'shelf', want);
       m.cards[p].forEach(function (s) { if (s === bs) { undo.card = { s: s, done: s.done, on: s.doneOn, by: s.doneBy }; s.done = true; s.doneOn = today; s.doneBy = who; } });
@@ -564,7 +553,6 @@ var StockLib = (function () {
       }
     }
     if (undo.card) { undo.card.s.done = undo.card.done; undo.card.s.doneOn = undo.card.on; undo.card.s.doneBy = undo.card.by; }
-    if (undo.dDone === undefined) { m.progress = copy(undo.progress); return; }   // (an old-style record: whole snapshot)
     m.progress.done = Math.max(0, m.progress.done - undo.dDone); m.progress.mine = Math.max(0, m.progress.mine - undo.dMine);   // only this save's own change: later queued saves keep theirs
     if (m.second) m.progress.second = m.second.filter(function (x) { return !x.done; }).length;
     pct(m.progress);
@@ -599,7 +587,7 @@ var StockLib = (function () {
   /** the automatic list refresh waits while counts are waiting to be sent; a waiting (even failing) picture does not hold it back */
   L.syncHeld = function (q, manual) { return !manual && q.some(function (e) { return e.kind !== 'photo'; }); };
   L.qFailing = function (q) { return q.length > 0 && q[0].tries >= 2; };
-  /** the daily 10-minute rule: a daily save that waits in the queue longer than 10 minutes after the photo is refused by the server, so with no signal (or a failing queue) the daily page says so (a warning, never a block) */
+  /** Daily 10-minute rule: a daily save waiting in the queue over 10 minutes after the photo is refused by the server, so with no signal (or a failing queue) the daily page warns (never blocks). */
   L.SIG_WARN = 'ไม่มีสัญญาณ รายการนับรายวันต้องส่งภายใน 10 นาทีหลังถ่ายรูป';
   L.noSignal = function (online, q) { return online === false || L.qFailing(q || []); };
   L.qSerialize = function (q, withPhoto) {
@@ -609,10 +597,7 @@ var StockLib = (function () {
       return c;
     }));
   };
-  /**
-   * Reads a stored queue back (never throws). Damaged lines and entries made under ANOTHER token are dropped. An entry whose photo had to be left out
-   * (phone storage too small) comes back with lostPhoto:true: the app shows it as "ต้องถ่ายรูปใหม่", it is never sent without its photo.
-   */
+  /** Reads a stored queue back (never throws); damaged lines and entries of ANOTHER token are dropped. An entry whose photo was left out (phone storage too small) comes back lostPhoto:true: shown as "ต้องถ่ายรูปใหม่", never sent without its photo. */
   L.qParse = function (text, token) {
     var a = null;
     try { a = JSON.parse(text); } catch (e) { a = null; }
@@ -622,12 +607,7 @@ var StockLib = (function () {
   };
 
   /* ---- camera: when does the SAME barcode count again? ---- */
-  /**
-   * The re-arm gate of piece scanning. A code in view counts once; it counts again only after it has been out of view long enough. "Out of view" =
-   * N consecutive decode callbacks with nothing, where N follows the measured callback rate (about floorMs worth of callbacks, 2..12), AND at least floorMs
-   * since the code was last seen. So a slow decoder (one callback per second) and a fast one (every 100 ms) both need about 0.7 s of real absence, and a
-   * single missed frame while the barcode is still in view never re-arms. feed(text, nowMs) -> true when this read must be counted.
-   */
+  /** The re-arm gate of piece scanning: a code in view counts once, and again only after it was out of view long enough = N consecutive empty decode callbacks (N follows the measured callback rate, about floorMs worth, 2..12) AND at least floorMs since last seen. A single missed frame never re-arms. feed(text, nowMs) -> true when this read must be counted. */
   L.makeGate = function (floorMs) {
     floorMs = floorMs || 700;
     var g = { armed: true, lastSeen: 0, empties: 0, lastCb: 0, avg: 0 };
@@ -669,12 +649,10 @@ var StockLib = (function () {
     var sw = Math.max(1, Math.round(vw * 0.9)), sh = Math.max(1, Math.round(vh * 0.35));
     return { sx: Math.round((vw - sw) / 2), sy: Math.round((vh - sh) / 2), sw: sw, sh: sh };
   };
-  /** Which view ZXing decodes on live frame n. Budget: the centre band (full resolution) gets at least 2 of every 3 frames; the third frame cycles whole frame (downscaled), inverted band, rotated strip, band. */
+  /** Which view ZXing decodes on live frame n: the centre band gets at least 2 of every 3 frames; the third cycles whole frame (downscaled), inverted band, rotated strip, band. */
   L.zxVariant = function (n) { var m = ((n % 12) + 12) % 12; return m % 3 !== 2 ? 'band' : ['full', 'inv', 'rot', 'band'][(m - 2) / 3]; };
   L.LIVE_FULL_MAX = 960;   // the whole-frame live view is shrunk to this long edge before ZXing sees it (never a 1080x1920 decode on the main thread)
-  /** Photo decode plan for a picture of iw x ih pixels: views in the order tried, each {tag, sx, sy, sw, sh (source rectangle, NATIVE pixels), dw, dh (drawn size), rot (0/90/270), inv}.
-   *  Order: centre band (full width, 30% height, native), centre tile, whole picture (long edge <= 2000), centre vertical strip turned 90, the other 8 tiles of a 3x3 overlapping set (each <= 1600 px, native),
-   *  whole turned 90 and 270, the band and the whole inverted. A small barcode (30% of a 4032 px picture) is only readable at native size, so the crops come before the shrunk whole view's rotations. */
+  /** Photo decode plan for iw x ih pixels: views in the order tried, each {tag, sx, sy, sw, sh (native source rect), dw, dh, rot (0/90/270), inv}. Order: centre band, centre tile, whole picture (long edge <= 2000), centre vertical strip turned 90, the other 8 tiles of a 3x3 overlapping set, whole turned 90 / 270, band and whole inverted. A small barcode is only readable at native size, so crops come before the shrunk whole view's rotations. */
   L.PHOTO_BUDGET_MS = 9000; L.PHOTO_WHOLE_MAX = 2000; L.PHOTO_TILE_MAX = 1600; L.PHOTO_BAND_MAX = 4200;
   L.photoViewPlan = function (iw, ih) {
     iw = Math.max(1, Math.round(Number(iw) || 0)); ih = Math.max(1, Math.round(Number(ih) || 0));
@@ -703,7 +681,7 @@ var StockLib = (function () {
     var ok = Array.isArray(supported) && supported.some(function (f) { return f === 'code_128' || f === 'code_39'; });
     return ok ? 'native' : 'zxing';
   };
-  /** Android camera pick: devices = enumerateDevices() entries. Returns the deviceId of the main back camera (lowest camera2 index, no ultra/wide/tele/depth/macro lens) or '' (keep facingMode: iOS, unknown labels). */
+  /** Android camera pick (devices = enumerateDevices()): the deviceId of the main back camera (lowest camera2 index, no ultra/wide/tele/depth/macro lens), or '' (keep facingMode). */
   L.pickBackCamera = function (devices) {
     var BAD = /ultra|wide|tele|depth|macro/i, best = null;
     (devices || []).forEach(function (d) {
@@ -715,7 +693,7 @@ var StockLib = (function () {
     });
     return best ? best.id : '';
   };
-  /** All back cameras -> [{id, label}], main first: "camera2 N, facing back" labels (good lenses, lowest index first), else any label with back/rear/environment (Samsung Internet may not use camera2 labels). Android use. */
+  /** All back cameras -> [{id, label}], main first: "camera2 N, facing back" labels, else any back/rear/environment label (Samsung Internet may lack camera2 labels). */
   L.backCameras = function (devices) {
     var BAD = /ultra|wide|tele|depth|macro/i, out = [];
     (devices || []).forEach(function (d) {
@@ -751,8 +729,7 @@ var StockLib = (function () {
   };
   /** iPhone / iPad (also iPadOS posing as a Mac): the camera pick below is only for these. */
   L.isIOS = function (ua, platform, touchPoints) { return /iPad|iPhone|iPod/.test(str(ua)) || (str(platform) === 'MacIntel' && Number(touchPoints) > 1); };
-  /** iOS camera pick (labels readable after permission): "Back Triple Camera", else "Back Dual Wide Camera" (both switch to the macro lens for close focus by themselves), else "Back Dual Camera".
-   *  Returns {id, virtual: true} or null (keep facingMode environment). */
+  /** iOS camera pick (labels readable after permission): "Back Triple Camera", else "Back Dual Wide Camera" (both switch to the macro lens by themselves), else "Back Dual Camera". Returns {id, virtual: true} or null (keep facingMode). */
   L.pickIosCamera = function (devices) {
     var pats = [/back triple camera/i, /back dual wide camera/i, /back dual camera/i], list = (devices || []).filter(function (d) { return d && d.kind === 'videoinput' && d.deviceId; });
     for (var i = 0; i < pats.length; i++) for (var j = 0; j < list.length; j++) if (pats[i].test(String(list[j].label || ''))) return { id: list[j].deviceId, virtual: true, wide: i < 2 };   // wide: Triple / Dual Wide start on the wide lens (2x); plain Dual (wide + tele, no macro) must not get the 2x default: it lands on the telephoto
@@ -809,7 +786,7 @@ var StockLib = (function () {
     if (/:\/\/|www\./i.test(raw)) return false;
     return /^[A-Z0-9]{5,20}$/.test(L.normScan(raw));
   };
-  /** The usable codes in a read, best first: the read itself when it is plausible, then the part before a trailing quantity / lot suffix ("5TL-H1919-00/12", "...+3", "... 12", "....5"). [] = rejected. */
+  /** The usable codes in a read, best first: the read itself when plausible, then the part before a trailing quantity / lot suffix ("5TL-H1919-00/12", "...+3"). [] = rejected. */
   L.readCandidates = function (text, m) {
     var raw = str(text), out = [];
     if (!raw || /:\/\/|www\./i.test(raw)) return out;
@@ -837,7 +814,7 @@ var StockLib = (function () {
       seen[key] = 1; return m;
     } };
   };
-  /** A typed code long enough to be a whole part code (a plausible code of 12+ normalised characters, e.g. 90793-AT479-00): if it is not in the list it is an unlisted product, not a half-typed search. */
+  /** A typed code long enough to be a whole part code (plausible, 12+ normalised characters): if it is not in the list it is an unlisted product, not a half-typed search. */
   L.isFullCode = function (text) {
     return L.isPlausibleCode(text) && L.normScan(text).length >= 12;
   };
@@ -893,7 +870,7 @@ var StockLib = (function () {
   /* ---- the daily count page ---- */
   var PHOTO_MAX_AGE = 10 * 60 * 1000;
   L.photoTooOld = function (lastModified, now) { return !lastModified || (now - lastModified) > PHOTO_MAX_AGE; };
-  /** Checks one daily card before it is queued (the same messages as the old page). d: {crates, per, loose, foundAt, photo, lastModified, now} (qty only for a plain entry) */
+  /** Checks one daily card before it is queued. d: {crates, per, loose, foundAt, photo, lastModified, now} (qty only for a plain entry) */
   var WHOLE_ONLY = 'กรอกจำนวนเป็นเลขจำนวนเต็มเท่านั้น';
   function whole(v) { var t = str(v).trim(); return t === '' ? null : (/^\d{1,6}$/.test(t) ? parseInt(t, 10) : NaN); }   // the server's rule exactly (Logic.gs wholeNumber): digits only, at most 6, no sign / decimal point
   L.whole = whole; L.WHOLE_ONLY = WHOLE_ONLY;
@@ -930,6 +907,25 @@ if (typeof module !== 'undefined' && module.exports) module.exports = StockLib;
 if (typeof document !== 'undefined') (function () {
   'use strict';
   var L = StockLib;
+  /* index.html and app.js out of step (CDN cache after a deploy): reload ONCE (a per-tab flag for this pair of versions stops a loop; where the tab store is unusable nothing is done) */
+  try {
+    var mySrc = '', cs = document.currentScript;
+    if (cs) mySrc = (cs.getAttribute && cs.getAttribute('src')) || cs.src || '';
+    if (!mySrc && document.getElementsByTagName) {
+      var scs = document.getElementsByTagName('script'), si;
+      for (si = 0; si < scs.length; si++) { var ssrc = (scs[si].getAttribute && scs[si].getAttribute('src')) || ''; if (/(^|\/)app\.js(\?|#|$)/.test(ssrc)) { mySrc = ssrc; break; } }
+    }
+    if (L.versionMismatch(L.APP_VERSION, mySrc)) {
+      var vkey = 'sc5.vreload', vtag = L.APP_VERSION + '/' + L.srcVersion(mySrc);
+      var vseen = sessionStorage.getItem(vkey) === vtag, vlast = null;   // (a webview that empties the tab store on reload would loop: a stamp in the phone store also holds the reload back for 2 minutes)
+      try { vlast = window.localStorage.getItem('sc5.vstamp'); } catch (eS) { vlast = null; }
+      if (!vseen && !L.recentReload(vlast, vtag, Date.now(), 120000)) {
+        sessionStorage.setItem(vkey, vtag);
+        try { window.localStorage.setItem('sc5.vstamp', JSON.stringify({ pair: vtag, time: Date.now() })); } catch (eW) { /* the tab flag alone guards */ }
+        location.reload(); return;
+      }
+    }
+  } catch (eV) { /* cannot compare / cannot guard: the app starts as it is */ }
   var ZXING_URL = 'https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js';
   var ZXING_SRI = 'sha384-BzBxP10ZE72aitqj5UMmUsbKFliP/DZqA8Wq+BNNhlIJDGoEd1tpkMYXOg9+n6sB';
   var SYNC_MS = 90000, WAIT_POLL_MS = 25000;
@@ -948,30 +944,35 @@ if (typeof document !== 'undefined') (function () {
   var T = L.resolveLink(location.hash, store.get(KLINK));
   if (T) {
     // (the saved copy is written only after the server has accepted this link: see acceptBoot)
-    if (!L.parseHash(location.hash)) { try { history.replaceState(null, '', location.href.split('#')[0] + '#x=' + T.x + '&t=' + T.t); } catch (e) { /* fine */ } }   // replaceState fires no hashchange
+    if (!L.parseHash(location.hash)) { try { history.replaceState(null, '', location.href.split('#')[0] + '#x=' + T.x + '&t=' + T.t); } catch (e) {} }   // replaceState fires no hashchange
   }
   var EXEC = T ? L.execUrl(T.x) : '';
   var KQ = T ? L.storeKey('q', T.t) : '', KL = T ? L.storeKey('l', T.t) : '';
 
   var PIN = null;                    // memory only, never stored. null = none typed (a probe / a person with no PIN)
   var M = null, D = null;            // full-count model / daily page
-  var cachedBoot = null;             // the last list this phone kept for this link (shown right after the PIN is typed)
+  var cachedBoot = null, cachedRaw = '';   // the last list this phone kept for this link (shown right after the PIN is typed); read from storage as text at start, parsed only when it is needed
+  function cached() { if (!cachedBoot && cachedRaw) { try { cachedBoot = JSON.parse(cachedRaw); } catch (e) { cachedBoot = null; } } cachedRaw = ''; return cachedBoot; }
   var verified = false, probing = false, pendingPin = null, paused = false;
   var Q = [], gone = Object.create(null), adopted = Object.create(null), vanished = Object.create(null), sendingRid = '', inflight = false, pumpTimer = null, syncTimer = null, toastTimer = null, lockTimer = null, undoMap = {};
   var ST = { q: '', shelf: '', showDone: false, tab: 'first', expanded: false };
-  var reloading = false, card = null, notes = [], prefill = {}, draft = {}, loadedAt = 0, noStore = false, offline = false, reloadWhenEmpty = false, lostList = [], offTimer = null;
+  var reloading = false, card = null, notes = [], prefill = {}, draft = {}, loadedAt = 0, noStore = false, listNoStore = false, offline = false, reloadWhenEmpty = false, lostList = [], offTimer = null;
   var KX = 'sc5.x';                  // the deployment id (execId) this phone has used successfully
 
   function $(id) { return document.getElementById(id); }
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
-  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+  function clear(node) { node.textContent = ''; }
   /** a Lucide icon from the sprite in index.html (decorative); a plain <i> where SVG is not available */
+  var icTpl = {};   // one built <svg> per icon name; a list of 150 rows clones it instead of building 300 from scratch
   function ic(name, cls) {
-    var NS = 'http://www.w3.org/2000/svg';
     if (!document.createElementNS) return el('i', 'ic' + (cls ? ' ' + cls : ''));
-    var s = document.createElementNS(NS, 'svg'), u = document.createElementNS(NS, 'use');
-    s.setAttribute('class', 'ic' + (cls ? ' ' + cls : '')); s.setAttribute('aria-hidden', 'true');
-    u.setAttribute('href', '#i-' + name); s.appendChild(u); return s;
+    var t = icTpl[name], s;
+    if (!t) {
+      var NS = 'http://www.w3.org/2000/svg', u = document.createElementNS(NS, 'use');
+      t = icTpl[name] = document.createElementNS(NS, 'svg');
+      t.setAttribute('aria-hidden', 'true'); u.setAttribute('href', '#i-' + name); t.appendChild(u);
+    }
+    s = t.cloneNode(true); s.setAttribute('class', 'ic' + (cls ? ' ' + cls : '')); return s;
   }
   function btn(cls, text) { var b = el('button', cls, text); b.type = 'button'; return b; }
   /** an outlined field with a floating label around an existing input */
@@ -1006,7 +1007,7 @@ if (typeof document !== 'undefined') (function () {
       o.connect(g); g.connect(actx.destination); o.start(); o.stop(actx.currentTime + 0.09);
     } catch (e) { /* no sound: fine */ }
   }
-  function buzz(p) { try { if (navigator.vibrate && vibOn()) navigator.vibrate(p); } catch (e) { /* ignore */ } }   // Settings: สั่นเมื่อสแกนติด (default on; the setting row is hidden where vibrate does not exist)
+  function buzz(p) { try { if (navigator.vibrate && vibOn()) navigator.vibrate(p); } catch (e) {} }   // Settings: สั่นเมื่อสแกนติด (default on; the setting row is hidden where vibrate does not exist)
   function toast(msg, ms) {
     var t = $('toast'); t.textContent = msg; t.hidden = false;
     clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, ms || 1800);
@@ -1014,8 +1015,8 @@ if (typeof document !== 'undefined') (function () {
 
   /* ---------------- network ---------------- */
   var NET = { ok: false, code: 'NET', error: 'เชื่อมต่อไม่ได้ ตรวจสอบสัญญาณแล้วลองใหม่' };
-  var locCache = {};   // v9: the last list the server sent for each place (this session only), shown at once when switching back while the fresh one loads
-  var pickLoc = '';   // v7: the location a roaming person picked (empty = the server decides)
+  var locCache = {};   // the last list the server sent for each place (this session only), shown at once when switching back while the fresh one loads
+  var pickLoc = '';   // the location a roaming person picked (empty = the server decides)
   function api(action, extra, cb, timeoutMs, token) {
     if (pickLoc && (action === 'boot' || action === 'sync' || action === 'daily')) { var ex = {}; Object.keys(extra || {}).forEach(function (k) { ex[k] = extra[k]; }); ex.loc = pickLoc; extra = ex; }
     var asked = (action === 'boot' || action === 'sync' || action === 'daily') ? pickLoc : null;   // the place this request asked for (a reply is judged against it)
@@ -1023,12 +1024,12 @@ if (typeof document !== 'undefined') (function () {
     function fin(res) {
       if (finished) return; finished = true; clearTimeout(to);
       bioWatch(res, srcBio);
-      if (asked !== null && res && typeof res === 'object' && res !== NET) { try { Object.defineProperty(res, '_asked', { value: asked, enumerable: false, configurable: true }); } catch (e) { /* ignore */ } }
+      if (asked !== null && res && typeof res === 'object' && res !== NET) { try { Object.defineProperty(res, '_asked', { value: asked, enumerable: false, configurable: true }); } catch (e) {} }
       cb(res);
     }
     try {
       if (typeof AbortController !== 'undefined') ctl = new AbortController();
-      to = setTimeout(function () { try { if (ctl) ctl.abort(); } catch (e) { /* ignore */ } fin(NET); }, timeoutMs || 30000);   // (always a timer: without AbortController the fetch cannot be cancelled, but the caller is released)
+      to = setTimeout(function () { try { if (ctl) ctl.abort(); } catch (e) {} fin(NET); }, timeoutMs || 30000);   // (always a timer: without AbortController the fetch cannot be cancelled, but the caller is released)
       window.fetch(EXEC, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body), redirect: 'follow', credentials: 'omit', cache: 'no-store', signal: ctl ? ctl.signal : undefined })
         .then(function (r) { return r.text(); })
         .then(function (t) { fin(L.parseResponse(t)); }, function () { fin(NET); });
@@ -1113,14 +1114,13 @@ if (typeof document !== 'undefined') (function () {
   }
   function submitPin(typed) {
     padBusy = true; PIN = typed; $('padMsg').textContent = 'กำลังตรวจรหัส…';
-    if (cachedBoot && !M && !D) { showCachedUnverified(); }   // the last list shows at once; it is only usable once the server accepts the PIN
+    if (cached() && !M && !D) { showCachedUnverified(); }   // the last list shows at once; it is only usable once the server accepts the PIN
     api('boot', {}, function (res) { padBusy = false; onBoot(res, true); });
   }
 
   /* ---------------- Face ID / fingerprint unlock (optional shortcut on top of the PIN) ----------------
-   * WebAuthn + the PRF extension: the phone's scan yields a secret that only this phone can make; it encrypts the PIN (AES-GCM).
-   * localStorage keeps only {v,id,salt,iv,ct}; the plain PIN is never stored. Anything that goes wrong falls back to the ordinary PIN pad.
-   * Only on a phone used by ONE staff link: if the storage holds data of another link, nothing is offered and nothing is scanned. */
+   * WebAuthn + PRF: the phone's scan yields a secret only this phone can make; it encrypts the PIN (AES-GCM). localStorage keeps only {v,id,salt,iv,ct}; the PIN is never stored; any failure falls back to the PIN pad.
+   * Only on a phone used by ONE staff link: data of another link in storage = nothing offered, nothing scanned. */
   var KBIO = T ? L.storeKey('bio', T.t) : '', KBION = T ? L.storeKey('bioNo', T.t) : '';
   var bioRec = null, bioState = 'idle', bioGen = 0, bioCtl = null, bioSourced = false, typedByHand = false, bioStale = false, padLocked = false;
   var bioSupport = null, bioOfferBusy = false, bioEnabling = false, bioAutoTried = false, bioTapCb = null, bioUid = null;
@@ -1154,7 +1154,7 @@ if (typeof document !== 'undefined') (function () {
   }
   function bioCancel() {
     bioGen++;
-    if (bioCtl) { try { bioCtl.abort(); } catch (e) { /* fine */ } bioCtl = null; }
+    if (bioCtl) { try { bioCtl.abort(); } catch (e) {} bioCtl = null; }
     bioState = 'idle';
   }
   /** what the pad shows: the PIN keys, or the scan wait / tap button, plus the "scan again" button when a scan is saved (never while the pad is locked) */
@@ -1221,7 +1221,7 @@ if (typeof document !== 'undefined') (function () {
   /** hide the sheet; an enable that was waiting for the confirm tap is given up */
   function bioOfferClose() {
     var cb = bioTapCb; bioTapCb = null;
-    try { $('bioOffer').hidden = true; } catch (e) { /* fine */ }
+    try { $('bioOffer').hidden = true; } catch (e) {}
     if (cb) cb.cancel();
   }
   function bioInit() {
@@ -1242,8 +1242,8 @@ if (typeof document !== 'undefined') (function () {
     $('bioOfferNo').addEventListener('click', function () { store.set(KBION, '1'); bioOfferClose(); bioDrawFoot(); });
     if (!bioLite()) { bioSupport = false; return; }
     try {   // the stable passkey user id: first 16 bytes of SHA-256(token), ready before the tap (iOS wants create() inside the tap)
-      window.crypto.subtle.digest('SHA-256', new window.TextEncoder().encode(T.t)).then(function (d) { bioUid = new Uint8Array(d).slice(0, 16); }, function () { /* fine */ });
-    } catch (e) { /* fine */ }
+      window.crypto.subtle.digest('SHA-256', new window.TextEncoder().encode(T.t)).then(function (d) { bioUid = new Uint8Array(d).slice(0, 16); }, function () {});
+    } catch (e) {}
     try {
       var P = window.PublicKeyCredential;
       P.isUserVerifyingPlatformAuthenticatorAvailable().then(function (v) {
@@ -1292,7 +1292,7 @@ if (typeof document !== 'undefined') (function () {
         if (!store.set(KBIO, JSON.stringify(rec))) throw { nostore: true };
         bioRec = L.bioParse(JSON.stringify(rec)); store.del(KBION); bioEnabling = false; done(true);
       }, function (err) {
-        bioEnabling = false; bioTapCb = null; try { $('bioOffer').hidden = true; } catch (e) { /* fine */ } store.set(KBION, '1');   // do not ask again; the menu button can still turn it on
+        bioEnabling = false; bioTapCb = null; try { $('bioOffer').hidden = true; } catch (e) {} store.set(KBION, '1');   // do not ask again; the menu button can still turn it on
         toast(err && err.noprf ? 'เครื่องนี้ใช้สแกนไม่ได้ ใช้รหัส PIN ต่อ' : 'ยังไม่ได้เปิดการสแกน ใช้รหัส PIN ต่อ', 3500);
         done(false);
       });
@@ -1302,9 +1302,10 @@ if (typeof document !== 'undefined') (function () {
   }
   /** After a typed PIN was accepted: offer the scan once (never over a card / the scan sheet; a busy moment is retried at the next refresh). */
   function bioMaybeOffer() {
+    if (saveListTimer) return;   // the list is still being stored: whether the storage works is not known yet (flushList asks again)
     if (!typedByHand || bioSourced || bioOfferBusy || !verified || offline || PIN === null || PIN === undefined || !T) return;
     if (bioRec || store.get(KBION) === '1' || bioSupport === false) { typedByHand = false; return; }
-    if (noStore || !bioAllowed() || bioSupport !== true) return;   // (support null: the availability check is still running and calls this again)
+    if (noStore || listNoStore || !bioAllowed() || bioSupport !== true) return;   // (listNoStore: the kept list could not be written - the same storage trouble; support null: the availability check is still running and calls this again)
     if (card || settingsOpen || !$('card').hidden || !$('scan').hidden || !$('pad').hidden || !$('bioOffer').hidden) return;
     typedByHand = false;
     bioOfferShow('ask');
@@ -1319,7 +1320,7 @@ if (typeof document !== 'undefined') (function () {
 
   /* ---------------- boot / sync ---------------- */
   function showCachedUnverified() {
-    try { acceptBoot(cachedBoot, true); } catch (e) { /* a damaged cache is just ignored */ M = null; D = null; }
+    try { acceptBoot(cached(), true); } catch (e) { /* a damaged cache is just ignored */ M = null; D = null; }
   }
   function onBoot(res, fromPad) {
     var c = L.classify(res);
@@ -1332,13 +1333,13 @@ if (typeof document !== 'undefined') (function () {
     }
     // network / server trouble (NET, BUSY, FAULT): the PIN was never checked, so NOTHING becomes "verified" here.
     // With a kept list the person can look at it (read-only: no card, no save, no queue send) until the server has accepted a PIN in this page load.
-    if (fromPad && cachedBoot && c === 'retry') { goOffline(res && res.error || NET.error); return; }
-    if (fromPad && cachedBoot) { showPad(res && res.error || NET.error, false); return; }   // a refusal (BAD etc.) is not "no signal": back to the pad with the reason, no offline polling
+    if (fromPad && cached() && c === 'retry') { goOffline(res && res.error || NET.error); return; }
+    if (fromPad && cached()) { showPad(res && res.error || NET.error, false); return; }   // a refusal (BAD etc.) is not "no signal": back to the pad with the reason, no offline polling
     if (fromPad) { $('padMsg').textContent = res.error || NET.error; PIN = null; padBuf = ''; drawDots(); padBusy = false; return; }
   }
   function goOffline(why) {
     verified = false; offline = true; bioDrawFoot();
-    try { acceptBoot(cachedBoot, true); } catch (e) { M = null; D = null; }
+    try { acceptBoot(cached(), true); } catch (e) { M = null; D = null; }
     $('pad').hidden = true; $('app').hidden = false; render(); drawInstall();
     clearTimeout(offTimer); offTimer = setTimeout(retryOnline, 15000);
   }
@@ -1370,9 +1371,10 @@ if (typeof document !== 'undefined') (function () {
     if (reloadWhenEmpty) return;   // another link was opened and the old person's saves are being sent: nothing may open the app (or the pad) under the old link meanwhile
     if (res.mode !== 'daily' && pickLoc && res.loc && res.loc !== pickLoc && res._asked !== undefined && res._asked !== pickLoc) return;   // a late reply to a request sent before the switch: dropped (the list of the picked place is on its way)
     if (res.mode !== 'daily' && pickLoc && res.loc && res.loc !== pickLoc && (res.locs || []).indexOf(pickLoc) >= 0) return;   // a late reply for a place the person has since left: dropped
-    if (res.mode !== 'daily' && pickLoc && res.loc && res.loc !== pickLoc && res._asked === pickLoc) { pickLoc = res.loc; try { $('locPick').value = res.loc; } catch (e) { /* ignore */ } }   // the server did not take the pick (not one of this person's places): follow the list it sent, never stay blocked
-    if (res.mode === 'daily') { M = null; D = res; geoMap = {}; } else { D = null; M = L.makeModel(res); }
-    if (res.mode !== 'daily') { geoMap = res.geo && typeof res.geo === 'object' ? res.geo : {}; if (!unverified && res.loc) locCache[res.loc] = { at: Date.now(), res: JSON.stringify(res) }; }
+    if (res.mode !== 'daily' && pickLoc && res.loc && res.loc !== pickLoc && res._asked === pickLoc) { pickLoc = res.loc; try { $('locPick').value = res.loc; } catch (e) {} }   // the server did not take the pick (not one of this person's places): follow the list it sent, never stay blocked
+    var kept = null;   // the copy of a daily list that is kept for the next start: taken BEFORE the queue overlay below marks queued items done (D is mutated by overlay / giveBack, the stored list must show what the server said)
+    if (res.mode === 'daily') { try { kept = JSON.parse(JSON.stringify(res)); } catch (e) { kept = null; } M = null; D = unverified && kept ? kept : res; geoMap = {}; } else { D = null; M = L.makeModel(res); }
+    if (res.mode !== 'daily') { geoMap = res.geo && typeof res.geo === 'object' ? res.geo : {}; if (!unverified && res.loc) locCache[res.loc] = { at: Date.now(), res: res }; }
     undoMap = {};
     Q.forEach(function (e) { overlay(e); });
     if (lostList.length) {   // entries whose photo could not be kept: the card comes back asking for a new photo
@@ -1384,26 +1386,38 @@ if (typeof document !== 'undefined') (function () {
       store.set(KX, T.x);   // from now on a link to ANOTHER deployment gets the red warning
       store.set(KLINK, JSON.stringify({ x: T.x, t: T.t }));   // the home-screen copy of the link: only a link the server accepted
       try { L.staleTokenKeys(store.keys(), T.t, function (k) { return store.get(k); }).forEach(function (k) { store.del(k); }); } catch (e) { /* leftovers stay: harmless */ }   // old links' list caches / declined marks / drafts (their queues are empty) must not switch biometrics off
-      var s = JSON.stringify(res); cachedBoot = res;
-      if (!store.set(KL, s)) noStore = true;
+      cachedBoot = kept || res; cachedRaw = ''; saveListLater(kept || res);
     }
     $('pad').hidden = true; $('app').hidden = false;
     if (noDraw) { $('who').textContent = 'สวัสดี ' + who(); renderBadge(); renderNotes(); redrawLater = true; } else render(); drawInstall();
     if (card && !card.unknown && card.mode === 'scan' && !card.camMsg && !$('card').hidden) drawCard();   // the PIN pad stopped the piece camera: bring it back with the card
-    if (!unverified && !udTried) { udTried = true; udRestore(); fdRestore(); ddRestore(); }
+    if (!unverified) { if (!udDone) udRestore(); if (!fdDone) fdRestore(); if (!ddTried) ddRestore(); }   // (the card drafts are asked again at every accepted list until they are used or thrown away: a roaming person's first list may be another place's)
     if (!unverified) { bioCancel(); bioStale = false; bioDrawFoot(); bioMaybeOffer(); }
     if (!unverified) { schedSync(); pump(); if (!geoStarted) { geoStarted = true; geoCheck(); } else geoFlush(); }
   }
-  var redrawLater = false;
+  var redrawLater = false, saveListTimer = null, listToSave = null;
+  /** the list kept for the next start is written a moment later, not while the screen is being drawn (the text of a big list is built and stored in one go: slow on a cheap phone) */
+  function saveListLater(res) {
+    listToSave = res; if (saveListTimer) return;
+    saveListTimer = setTimeout(function () { flushList(true); }, 0);
+  }
+  /** write the waiting list now (also when the page is being hidden or closed: a timer may never fire then). A failed write marks the storage as unusable, so the Face ID offer, which waits for this, is asked again afterwards. */
+  function flushList(offer) {
+    var r = listToSave; clearTimeout(saveListTimer); saveListTimer = null; listToSave = null;
+    if (!r || !KL) return;
+    if (store.set(KL, JSON.stringify(r))) listNoStore = false;
+    else { store.del(KL); listNoStore = true; }   // a failed write must not leave the OLD list behind (it would show later as the current one); only the Face ID guard learns about it - the queue is another key and still works (noStore stays as persistQ left it)
+    if (offer) bioMaybeOffer();
+  }
 
-  /* ---------------- v9: GPS picks the place for a roaming counter ---------------- */
+  /* ---------------- GPS picks the place for a roaming counter ---------------- */
   var geoLock = null, geoMap = {}, geoPlace = '', geoStarted = false, geoBusy = false, geoWait = false, geoHinted = false;
   function geoIdle() {
     if (!(verified && M && !D && !card && !settingsOpen && $('pad').hidden && $('scan').hidden && !$('app').hidden)) return false;
     try {
       var a = document.activeElement; if (a && a.tagName && /^(INPUT|TEXTAREA|SELECT)$/i.test(a.tagName)) return false;
       if ($('codeIn').value.trim() || $('codeSug').childNodes.length) return false;
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
     return !editingDaily();
   }
   function geoChoices() { var src = M || D; return src ? L.locChoices(src.locs, src.loc) : []; }
@@ -1414,7 +1428,7 @@ if (typeof document !== 'undefined') (function () {
       geoBusy = true;
       navigator.geolocation.getCurrentPosition(function (pos) {
         geoBusy = false;
-        try { geoOnFix({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy }); } catch (e) { /* ignore */ }
+        try { geoOnFix({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy }); } catch (e) {}
       }, function (err) {
         geoBusy = false;
         if (err && err.code === 1 && !geoHinted) { geoHinted = true; notes.push({ id: 'geo', kind: 'info', text: 'เปิดสิทธิ์ตำแหน่ง (GPS) ให้แอปนี้ เพื่อให้เปลี่ยนสถานที่ให้อัตโนมัติ ตอนนี้เลือกสถานที่เองได้ตามเดิม' }); renderNotes(); }
@@ -1440,9 +1454,9 @@ if (typeof document !== 'undefined') (function () {
     pickLoc = name; rebootFails = 0; ST.tab = 'first'; ST.shelf = '';
     if (!auto) { geoLock = { at: null }; geoCheck(); }   // (a fresh reading marks where the hand pick happened)
     if (card) backHome();
-    try { $('locPick').value = name; } catch (e) { /* ignore */ }
+    try { $('locPick').value = name; } catch (e) {}
     var hit = locCache[name];
-    if (hit && verified && Date.now() - hit.at < 600000) { try { acceptBoot(JSON.parse(hit.res), true); } catch (e) { /* the fresh list follows anyway */ } }   // (remembered list: shown at once; the fresh one replaces it in a moment)
+    if (hit && verified && Date.now() - hit.at < 600000) { try { acceptBoot(hit.res, true); } catch (e) { /* the fresh list follows anyway */ } }   // (remembered list: shown at once; the fresh one replaces it in a moment)
     $('sub').textContent = subText();
     reboot();
     if (auto) toast('ตอนนี้อยู่ที่ ' + name + ' — เปลี่ยนให้แล้ว', 4000);
@@ -1451,7 +1465,11 @@ if (typeof document !== 'undefined') (function () {
   function editingDaily() {
     var items = (D && D.items) || [], i, d;
     for (i = 0; i < items.length; i++) { d = !items[i].done && draft[items[i].id]; if (d && (d.crates || d.per || d.loose || d.foundAt || d.photo)) return true; }
-    try { var a = document.activeElement; if (a && a.tagName && /^(INPUT|TEXTAREA)$/i.test(a.tagName) && $('dList').contains && $('dList').contains(a)) return true; } catch (e) { /* ignore */ }
+    return focusInDaily();
+  }
+  /** the cursor is in a box of the daily page (a redraw would take it away) */
+  function focusInDaily() {
+    try { var a = document.activeElement; if (a && a.tagName && /^(INPUT|TEXTAREA)$/i.test(a.tagName) && $('dList').contains && $('dList').contains(a)) return true; } catch (e) {}
     return false;
   }
   function overlay(e) {   // a queued (not yet confirmed) save shows as done
@@ -1470,8 +1488,8 @@ if (typeof document !== 'undefined') (function () {
       if (c === 'ok' && ack !== ackSeq && drops < 3) { rebootTimer = setTimeout(function () { reboot(n, drops + 1); }, 1500); return; }   // a save was confirmed meanwhile: ask again (at most 3 times)
       if (c === 'ok') { rebootFails = 0; acceptBoot(res, false); }
       else if (c === 'pin') showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN');
-      else if (c === 'retry') { if (switching()) { rebootFails = n + 1; try { $('sub').textContent = subText(); } catch (e) { /* ignore */ } } if (switching()) rebootTimer = setTimeout(function () { reboot(n + 1); }, Math.min(30000, 2000 * Math.pow(2, n))); }
-      else if (switching()) { pickLoc = M.loc; try { $('locPick').value = M.loc; } catch (e) { /* ignore */ } $('sub').textContent = subText(); }   // refused: stay on the list we have, unblocked
+      else if (c === 'retry') { if (switching()) { rebootFails = n + 1; try { $('sub').textContent = subText(); } catch (e) {} } if (switching()) rebootTimer = setTimeout(function () { reboot(n + 1); }, Math.min(30000, 2000 * Math.pow(2, n))); }
+      else if (switching()) { pickLoc = M.loc; try { $('locPick').value = M.loc; } catch (e) {} $('sub').textContent = subText(); }   // refused: stay on the list we have, unblocked
     });
   }
 
@@ -1510,8 +1528,7 @@ if (typeof document !== 'undefined') (function () {
   }
 
   /* ---------------- queue ---------------- */
-  /** Two windows of the same link (the installed app + a Chrome tab, two tabs from LINE) share one localStorage key for the queue. Entries another window queued are taken over here
-      (never the ones this window already sent or dropped, never a photo that lost its picture); a taken-over entry goes in by its birth time so per-part order (qDue) holds. */
+  /** Two windows of the same link (installed app + Chrome tab) share one localStorage queue key. Entries another window queued are taken over (never ones this window already sent or dropped, never a photo that lost its picture), in birth-time order so per-part order (qDue) holds. */
   function dropQ(rid) { gone[rid] = 1; delete adopted[rid]; L.qDrop(Q, rid); }
   function mergeStored() {
     if (!KQ) return false;
@@ -1523,7 +1540,7 @@ if (typeof document !== 'undefined') (function () {
       var i = Q.length; while (i > 0 && Q[i - 1].born > e.born) i--;
       Q.splice(i, 0, e);
     });
-    if (add.length) setTimeout(function () { try { renderBadge(); } catch (e) { /* fine */ } pump(); }, 0);
+    if (add.length) setTimeout(function () { try { renderBadge(); } catch (e) {} pump(); }, 0);
     return add.length > 0;
   }
   /** another window wrote the queue: take over what is new; what this window took over earlier and the other window has since sent / given back is dropped here too (never the one being sent now) */
@@ -1545,6 +1562,8 @@ if (typeof document !== 'undefined') (function () {
     mergeStored();
     if (!Q.length) { store.del(KQ); return; }
     if (store.set(KQ, L.qSerialize(Q, true))) { noStore = false; return; }
+    store.del(KL);   // the kept list may be what fills the storage: it is only a cache (the next boot writes it again) - drop it and try the full queue once more before the pictures are left out
+    if (store.set(KQ, L.qSerialize(Q, true))) { noStore = false; return; }
     if (!store.set(KQ, L.qSerialize(Q, false))) noStore = true;
     else noStore = Q.some(function (e) { return e.body && e.body.photo; });   // the pictures were left out of the stored copy: a daily entry still holding one lives only in memory   // photos too big for the phone's storage, or no storage at all: keep the page open
   }
@@ -1563,7 +1582,7 @@ if (typeof document !== 'undefined') (function () {
         var idb = window.indexedDB; if (!idb) { done(null); return; }
         timer = setTimeout(function () { done(null); }, OPEN_MS);   // iOS sometimes never calls back: give up (memory only) - a late success is still used
         var r = idb.open('sc5photos', 1);
-        r.onupgradeneeded = function () { try { r.result.createObjectStore('p'); } catch (e) { /* ignore */ } };
+        r.onupgradeneeded = function () { try { r.result.createObjectStore('p'); } catch (e) {} };
         r.onsuccess = function () { done(r.result); };
         r.onerror = r.onblocked = function () { done(null); };
       } catch (e) { done(null); }
@@ -1591,7 +1610,7 @@ if (typeof document !== 'undefined') (function () {
       },
       del: function (k) {
         delete mem[k]; delete memOnly[k];
-        open(function (d) { if (!d) return; try { d.transaction('p', 'readwrite').objectStore('p').delete(k); } catch (e) { /* ignore */ } });
+        open(function (d) { if (!d) return; try { d.transaction('p', 'readwrite').objectStore('p').delete(k); } catch (e) {} });
       },
       /** forget a broken connection so the next call opens again */
       reset: function () { db = null; failed = false; },
@@ -1661,12 +1680,12 @@ if (typeof document !== 'undefined') (function () {
   var waitFrom = 0;
   /** the old link stays open (its unsent saves are in memory only): put its #hash back (replaceState fires no hashchange) and say why */
   function keepOldLink() {
-    try { history.replaceState(null, '', location.href.split('#')[0] + '#x=' + T.x + '&t=' + T.t); } catch (e) { /* fine */ }
+    try { history.replaceState(null, '', location.href.split('#')[0] + '#x=' + T.x + '&t=' + T.t); } catch (e) {}
     toast('ส่งงานของลิงก์เดิมก่อน', 4000);
     try { if (!$('pad').hidden) $('padMsg').textContent = OLD_LINK_MSG; } catch (e) { /* the toast said it */ }   // a lasting line on the pad, not only the toast
   }
   var OLD_LINK_MSG = 'ลิงก์เดิมยังมีงานรอส่ง ให้เจ้าของลิงก์เดิมใส่รหัส';
-  /** the wait for another link's open: ends when the queue is empty; with a DURABLE queue (it is safe in sc5.q.<token>) also after 10 s, at once without signal, or when the sends keep failing - only a memory-only queue is waited for as long as it takes */
+  /** The wait for another link's open: ends when the queue is empty; with a DURABLE queue (safe in sc5.q.<token>) also after 10 s, at once without signal, or when sends keep failing; a memory-only queue is waited for as long as it takes. */
   function reloadWatch() {
     clearTimeout(reloadPoll);
     if (!Q.length) { reloadNow(); return; }
@@ -1691,14 +1710,14 @@ if (typeof document !== 'undefined') (function () {
       if (e.kind === 'fc' && e.body.second) setTimeout(function () { doSync(true, true); }, 400);   // others may have counted too
       renderNotes();
     } else if (c === 'retry') {
-      // a picture / count the server keeps failing on (Drive full / blocked / a FAULT every time) is given up after a while; only when THIS reply is itself a fault (a network loss or a busy count never gives back)
+      // a picture / count the server keeps failing on (Drive full, FAULT every time) is given up after a while; only when THIS reply is a fault (a network loss or a busy count never gives back)
       var fault = !!(res && (res.code === 'FAULT' || (e.kind === 'photo' && res.code === 'BUSY')));
       if (fault) { e.firstFail = e.firstFail || Date.now(); e.lastFault = true; } else e.lastFault = false;
       if (fault && Date.now() - e.firstFail >= L.GIVEUP_MS) { dropQ(e.rid); persistQ(); giveBack(e, 'ส่งไม่ได้นานเกินไป'); renderBadge(); pump(); if (reloadWhenEmpty && !Q.length) reloadNow(); return; }
       L.qRetry(Q, e.rid, Date.now()); persistQ();
     } else if (c === 'pin') {
       paused = true; var keptOld = false;
-      if (reloadWhenEmpty && (noStore || memOnlyPhotos())) {   // waiting for another link, but the saves live only in memory and the old person's PIN is needed: stop waiting, show the OLD link's pad (the old person types the PIN, the saves go, then the new link can be opened)
+      if (reloadWhenEmpty && (noStore || memOnlyPhotos())) {   // waiting for another link but the saves live only in memory and the old person's PIN is needed: show the OLD link's pad (the saves go after the PIN, then the new link opens)
         reloadWhenEmpty = false; clearTimeout(reloadPoll); $('waitq').hidden = true; keptOld = true; keepOldLink();
       } else if (reloadWhenEmpty) { reloadNow(); return; }   // waiting for another link: never show the OLD link's pad (the new person's PIN would burn its tries); the queue is safe in storage, so just start over
       if (!(res.code === 'SETPIN' && setMode && !$('pad').hidden)) showPad(keptOld ? OLD_LINK_MSG + (res.error ? ' — ' + res.error : '') : (res.error || ''), res.code === 'LOCK', res.code === 'SETPIN');   // (a pad already in set mode keeps the digits being typed)
@@ -1727,12 +1746,19 @@ if (typeof document !== 'undefined') (function () {
       notes.push({ id: e.rid, kind: 'err', text: 'ไม่ได้ส่ง ' + e.label + ' — ' + why.text + (why.needPhoto ? '' : ' (คืนรายการแล้ว กรอกและถ่ายรูปใหม่ได้)') });
     }
     render();
-    if (resync) doSync(true, true);
+    if (resync) resyncSoon();
+  }
+  /** several refused full-count entries in a row (a lock, a day change) ask for ONE list refresh, a moment later, not one per entry */
+  var resyncPending = false;
+  function resyncSoon() {
+    if (resyncPending) return;
+    resyncPending = true;
+    setTimeout(function () { resyncPending = false; doSync(true, true); }, 0);
   }
   function sigOnline() { try { return navigator.onLine; } catch (e) { return true; } }
   /** show / hide the no-signal warning of every daily card on the page (the queue or the connection changed) */
   function sigUpdate() {
-    try { var w = document.querySelectorAll('.sigwarn'), on = L.noSignal(sigOnline(), Q), i; for (i = 0; i < w.length; i++) { w[i].textContent = L.SIG_WARN; w[i].hidden = !on; } } catch (e) { /* ignore */ }
+    try { var w = document.querySelectorAll('.sigwarn'), on = L.noSignal(sigOnline(), Q), i; for (i = 0; i < w.length; i++) { w[i].textContent = L.SIG_WARN; w[i].hidden = !on; } } catch (e) {}
   }
   function renderBadge() {
     var b = $('qbadge');
@@ -1776,7 +1802,7 @@ if (typeof document !== 'undefined') (function () {
     if (M) renderFc(); else if (D) renderDaily();
   }
 
-  /** v7: a roaming person's location picker (only shown when there is more than one place to go). */
+  /** a roaming person's location picker (only shown when there is more than one place to go). */
   function renderLocBar() {
     var bar = $('locBar'), src = M || D || {}, choices = L.locChoices(src.locs, src.loc), sel = $('locPick');
     if (!choices.length) { bar.hidden = true; return; }
@@ -1796,8 +1822,7 @@ if (typeof document !== 'undefined') (function () {
     var stopShine = function () { box.classList.remove('sbshine'); };
     box.addEventListener('animationend', stopShine); setTimeout(stopShine, 4000);
   }
-  /** One scoreboard card (full count and daily look the same): a head with the title, the person's own line and a ดูทั้งหมด/ซ่อน tag, and a body that slides open (grid rows 0fr -> 1fr) with every row.
-   *  The toggle only flips classes (no rebuild), so the slide plays. fill(x, ct) writes one row's number. */
+  /** One scoreboard card (full count and daily look the same): a head (title, own line, ดูทั้งหมด/ซ่อน tag) and a body that slides open (grid rows 0fr -> 1fr). The toggle only flips classes, so the slide plays. fill(x, ct) writes one row's number. */
   function drawBoard(box, t2, rows, meRank, fill) {
     clear(box);
     var h = btn('sbhead'), tx = el('div', 'tx'), tg = el('span', 'tg', sbOpen ? 'ซ่อน' : 'ดูทั้งหมด'), body = el('div', 'sbbody' + (sbOpen ? ' open' : '')), inner = el('div'), list = el('div', 'sbrows'), MEDAL = ['🥇', '🥈', '🥉'];
@@ -1878,12 +1903,11 @@ if (typeof document !== 'undefined') (function () {
       if (!src.length) { box.appendChild(el('div', 'msg ok', M.secondMessage || 'ตอนนี้ไม่มีรายการให้คุณนับซ้ำ')); return; }
       box.appendChild(el('div', 'caption', 'ต้องนับซ้ำ: นับให้ตรงตามที่เห็นจริง (เรียงตามความสำคัญ)'));
     }
-    // counted part+shelf rows (by anyone, or this phone's own saves) stay hidden in the plain "not counted yet" view, but show as green rows at the bottom of their shelf as soon as the person searches, picks a shelf or ticks "show counted"
+    // counted rows stay hidden in the plain "not counted yet" view, but show as green rows at the bottom of their shelf once the person searches, picks a shelf or ticks "show counted"
     var f = L.filterItems(M, src, { q: ST.q, shelf: ST.shelf, showDone: ST.showDone || (forced && !second), doneLast: !second, max: 150 });
-    var fCount = (forced && !ST.showDone && !second) ? L.filterItems(M, src, { q: ST.q, shelf: ST.shelf, showDone: false, max: 150 }) : f;
     if (!second) {
       $('uncLbl').textContent = ST.showDone ? 'ทุกรายการ' : 'ยังไม่ได้นับ';
-      $('uncCnt').textContent = fmt(fCount.rows.length + fCount.hidden);
+      $('uncCnt').textContent = fmt((forced && !ST.showDone) ? f.un : f.rows.length + f.hidden);   // a search shows counted rows too (f), but the number is still the matches that are not counted yet
       head.setAttribute('aria-expanded', open ? 'true' : 'false'); head.disabled = forced; head.setAttribute('aria-disabled', forced ? 'true' : 'false');
       $('vwrap').hidden = !open;
       panel.className = 'panel';
@@ -1910,7 +1934,9 @@ if (typeof document !== 'undefined') (function () {
     b.appendChild(ic('chevron-right', 'chev'));
     b.addEventListener('click', function () {
       if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
-      openCard(ST.tab === 'second' ? L.cardOfSecondRow(M, it.p) : L.cardOf(M, it.p, true), it.shelf, false);
+      var oc = ST.tab === 'second' ? L.cardOfSecondRow(M, it.p) : L.cardOf(M, it.p, true);
+      if (ST.tab !== 'second') oc.ff = true;   // opened by a tap on a first-list row (kept in the draft: see fdRestore)
+      openCard(oc, it.shelf, false);
     });
     return b;
   }
@@ -1966,46 +1992,59 @@ if (typeof document !== 'undefined') (function () {
     if (card.ext) { card.otherOpen = needShelf(); if (!needShelf()) { card.shelf = ''; card.other = true; } }   // a part from another location: a branch needs no shelf (the branch itself), the main shop asks for a name
     card.mode = 'type'; card.qty = 0; card.lock = ''; card.warn = ''; card.err = ''; card.camMsg = ''; card.leave = false; card.unknown = false;
     card.loc = L.saveLoc(M, pickLoc);   // the place is fixed when the card opens, not read again at save time
-    udClear(); showCard(); focusQty();
+    udClear(); fdClear(); showCard(); focusQty();
   }
   /** the card opens in type mode: put the cursor in the quantity box (iOS may refuse to open the keyboard - harmless) */
-  function focusQty() { try { var q = $('qtyIn'); if (q && card && card.mode === 'type') q.focus(); } catch (e) { /* ignore */ } }
-  var KUD = T ? 'sc5.ud.' + T.t : '', udTried = false;
-  /** A small draft of the unknown-code card (code, quantity, shelf) in the tab session store (KUD): an Android tab reload while the camera app is open must not lose what was typed (the photo may be lost). */
-  function udSave() { if (!KUD || !card || !card.unknown) return; try { sessionStorage.setItem(KUD, JSON.stringify({ code: card.ucode, qty: card.qty, shelf: card.ushelf, loc: card.uloc || L.saveLoc(M, pickLoc) })); } catch (e) { /* ignore */ } }
-  function udClear() { try { if (KUD) sessionStorage.removeItem(KUD); } catch (e) { /* ignore */ } }
+  function focusQty() { try { var q = $('qtyIn'); if (q && card && card.mode === 'type') q.focus(); } catch (e) {} }
+  var KUD = T ? 'sc5.ud.' + T.t : '', udDone = false, fdDone = false;
+  /** A small draft of the unknown-code card (code, quantity, shelf) in the tab session store (KUD): an Android tab reload while the camera app is open must not lose what was typed. */
+  function udSave() { if (!KUD || !card || !card.unknown) return; try { sessionStorage.setItem(KUD, JSON.stringify({ d: today(), code: card.ucode, qty: card.qty, shelf: card.ushelf, loc: card.uloc || L.saveLoc(M, pickLoc) })); } catch (e) {} }
+  function udClear() { try { if (KUD) sessionStorage.removeItem(KUD); } catch (e) {} }
+  /** nothing the person is looking at (scan sheet, Settings) is closed by a draft that comes back later than the first list */
+  function restoreIdle() { try { return $('scan').hidden && !settingsOpen && $('pad').hidden; } catch (e) { return true; } }
+  /** the same day and place as the list on screen: 'ok'; another day: 'stale' (thrown away); another place: 'wait' (kept: a roaming person's first list is the default place - asked again when the list of the draft's place is accepted) */
+  function draftFit(d) { if (d.d !== today()) return 'stale'; if (d.loc && M.loc && d.loc !== M.loc) return 'wait'; return 'ok'; }
   function udRestore() {
     var d = null; try { d = KUD ? JSON.parse(sessionStorage.getItem(KUD) || 'null') : null; } catch (e) { d = null; }
-    if (!d || !d.code || card || !M) { if (d && !M) udClear(); return; }
+    udDone = true;
+    if (!d) return;
+    if (!d.code || !M) { udClear(); return; }
+    if (card || !restoreIdle()) { udDone = false; return; }
+    var fit = draftFit(d);
+    if (fit === 'stale') { udClear(); return; }
+    if (fit === 'wait') { udDone = false; return; }
     card = { unknown: true, ucode: String(d.code), qty: String(d.qty === undefined ? '' : d.qty), ushelf: String(d.shelf || ''), uloc: String(d.loc || ''), err: 'ต้องถ่ายรูปสินค้าใหม่อีกครั้ง', restored: true }; showCard();
   }
   function openUnknown(code) { if (switchBlocked()) return; card = { unknown: true, ucode: code, qty: '', ushelf: '', err: '', loc: L.saveLoc(M, pickLoc) }; fdClear(); udSave(); showCard(); }
-  /* ---- drafts of the open full-count card (KFD) and of the daily cards (KDD) in the tab session store, like the unknown-code draft above ----
-   * An Android tab can be killed while the system camera is open (the daily ถ่ายรูป button, the per-piece photo fallback) or when the person switches apps: what was typed / scanned comes back
-   * after the PIN is accepted. Only what the counter typed or scanned is kept (a part id, the shelf they picked, the quantity they entered, the place, the date) and NEVER a photo. Every access is in try/catch (the store may be missing). */
+  /* ---- drafts of the open full-count card (KFD) and the daily cards (KDD) in the tab session store, like the unknown-code draft above ----
+   * An Android tab can be killed while the camera app is open: what was typed / scanned comes back after the PIN. Only typed or scanned values are kept (part id, shelf, quantity, place, date), NEVER a photo. Every access is in try/catch. */
   var KFD = T ? 'sc5.fd.' + T.t : '', KDD = T ? 'sc5.dd.' + T.t : '', ddTried = false;
   function str(v) { return v === null || v === undefined ? '' : String(v); }
   function ssRead(k) { try { return k ? JSON.parse(sessionStorage.getItem(k) || 'null') : null; } catch (e) { return null; } }
-  function ssWrite(k, v) { try { if (k) sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ignore */ } }
-  function ssDrop(k) { try { if (k) sessionStorage.removeItem(k); } catch (e) { /* ignore */ } }
+  function ssWrite(k, v) { try { if (k) sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function ssDrop(k) { try { if (k) sessionStorage.removeItem(k); } catch (e) {} }
   function fdSave() {
     if (!KFD || !card || card.unknown) return;
-    ssWrite(KFD, { d: today(), id: card.ext ? '' : str(card.id), ext: !!card.ext, code2: card.ext ? str(card.code2) : '', second: !!card.second, shelf: card.shelf === null ? null : str(card.shelf), other: !!card.other, otherOpen: !!card.otherOpen,
+    ssWrite(KFD, { d: today(), id: card.ext ? '' : str(card.id), ext: !!card.ext, code2: card.ext ? str(card.code2) : '', second: !!card.second, ff: !!card.ff, shelf: card.shelf === null ? null : str(card.shelf), other: !!card.other, otherOpen: !!card.otherOpen,
       otherDraft: str(card.otherDraft), mode: card.mode === 'scan' ? 'scan' : 'type', qty: Number(card.qty) > 0 ? Math.floor(Number(card.qty)) : 0, lock: str(card.lock), loc: str(card.loc || L.saveLoc(M, pickLoc)) });
   }
   function fdClear() { ssDrop(KFD); }
   /** after the PIN: the part card that was open comes back with what was typed / scanned (only when the same part still exists in the same place's list on the same day) */
   function fdRestore() {
     var d = ssRead(KFD);
+    fdDone = true;
     if (!d) return;
-    if (card || !M) { if (!M) fdClear(); return; }
-    var p = -1, c;
-    if (d.d !== today() || (d.loc && M.loc && d.loc !== M.loc)) { fdClear(); return; }
+    if (!M) { fdClear(); return; }
+    if (card || !restoreIdle()) { fdDone = false; return; }
+    var p = -1, c, fit = draftFit(d);
+    if (fit === 'stale') { fdClear(); return; }
+    if (fit === 'wait') { fdDone = false; return; }   // another place's list: the draft is kept (it goes on backHome / openCard / another day)
     if (d.ext) { p = L.findPart(M, d.code2); if (p < 0 || !M.parts[p].ext) p = -1; }
     else if (d.id && d.id in M.idIndex) p = M.idIndex[d.id];
     if (p < 0) { fdClear(); return; }
-    c = d.ext ? L.cardOf(M, p, false) : (d.second ? L.cardOfSecondRow(M, p) : L.cardOf(M, p, true));
+    c = d.ext ? L.cardOf(M, p, false) : (d.second ? L.cardOfSecondRow(M, p) : L.cardOf(M, p, !!d.ff));   // (opened by a tap on a first-list row: forced first card; by scan / search: the card the server's list gives now)
     if (!!c.second !== !!d.second || (!c.ext && !c.shelves.length)) { fdClear(); return; }   // the part changed meaning meanwhile (a blind recount appeared / went): start from the list again
+    c.ff = !d.ext && !d.second && !!d.ff;
     c.shelf = d.shelf === null ? null : str(d.shelf); c.other = !!d.other; c.otherOpen = !!d.otherOpen; c.otherDraft = str(d.otherDraft);
     if (c.shelf !== null && c.shelf !== '' && !c.other && !c.ext && !shelfIn(c, c.shelf)) c.shelf = null;   // a DMS shelf that is no longer in the list: pick again
     c.mode = d.mode === 'scan' ? 'scan' : 'type'; c.qty = Number(d.qty) > 0 ? Math.floor(Number(d.qty)) : 0; c.lock = c.mode === 'scan' ? str(d.lock) : '';
@@ -2028,7 +2067,7 @@ if (typeof document !== 'undefined') (function () {
   /** after the PIN: the typed boxes of the daily cards that were open come back (the photo never does: the person takes it again, and the 10-minute rule stays) */
   function ddRestore() {
     ddTried = true;
-    var d = ssRead(KDD), any = false, st, o, busy = editingDaily();
+    var d = ssRead(KDD), any = false, st, o, busy = focusInDaily();   // (typed text and photos live in draft[], so a redraw keeps them; only a cursor in a box makes it wait)
     if (!d) return;
     if (!D || d.d !== today() || !d.items || typeof d.items !== 'object') { ssDrop(KDD); return; }
     (D.items || []).forEach(function (it) {
@@ -2044,8 +2083,7 @@ if (typeof document !== 'undefined') (function () {
   }
   function showCard() { hideSug(); closeScan(); closeSettings(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); syncLayer(); drawInstall(); }
   function backHome() { camStop(); card = null; udClear(); fdClear(); $('card').hidden = true; $('home').hidden = false; if (M) { renderProg(); renderChips(); renderList(); } else if (D) renderDaily(); renderNotes(); syncLayer(); geoFlush(); drawInstall(); }
-  /* Android back button / back gesture: while the card or the scan sheet is open, one history entry (same URL, state object only) sits on top, so "back" closes that layer
-     instead of leaving the app. Closing a layer by hand removes the entry again; the swallow flag ignores the popstate that this causes. */
+  /* Android back button: while the card or scan sheet is open, one history entry (same URL) sits on top so "back" closes that layer instead of leaving the app; closing by hand removes it again (the swallow flag ignores the popstate that causes). */
   var layerPushed = false, layerSwallow = false, settingsOpen = false;
   function layerOpen() { return !!card || !$('scan').hidden || settingsOpen; }
   function syncLayer() {
@@ -2233,9 +2271,9 @@ if (typeof document !== 'undefined') (function () {
     else if (d.action === 'wrong') { card.warn = 'บาร์โค้ดไม่ตรงกับชิ้นนี้ ไม่นับ'; beep(); buzz([80, 60, 80]); setBig(); }
   }
 
-  /** A count at a branch needs no shelf name: the server uses the branch itself as the place (v7). The main shop still asks for one. */
+  /** A count at a branch needs no shelf name: the server uses the branch itself as the place. The main shop still asks for one. */
   function needShelf() { var l = (card && card.unknown && card.uloc) || (M && M.loc); return !(l && l !== 'สนง.ใหญ่'); }
-  /** keep a nowrap line on ONE line: if it still overflows (Android text scaling, a wider fallback font) step its font size down by 0.5 px until it fits or reaches 12 px. Never hides or cuts the text. Runs once per draw. */
+  /** keep a nowrap line on ONE line: if it still overflows (Android text scaling, wider fallback font) step its font size down by 0.5 px until it fits or reaches 12 px. Never cuts the text. Once per draw. */
   function fitOneLine(node) {
     try {
       if (typeof window.getComputedStyle !== 'function') return;
@@ -2263,7 +2301,7 @@ if (typeof document !== 'undefined') (function () {
       var cm = el('span', 'cam'); cm.appendChild(ic('camera', 'big')); tile.appendChild(cm); tile.appendChild(el('span', 'tx', 'แตะเพื่อถ่ายรูปสินค้า'));
     }
     var pf = el('input'); pf.type = 'file'; pf.id = 'uphoto'; pf.accept = 'image/*'; pf.setAttribute('capture', 'environment'); pf.style.position = 'absolute'; pf.style.left = '-9999px'; tile.appendChild(pf);
-    var pg = null;   // after a tab reload (a restored draft) the shot just taken may be in the gallery: a second picker WITHOUT capture opens the gallery (a low-memory phone can kill the page every time the camera app opens)
+    var pg = null;   // after a tab reload the shot just taken may be in the gallery: a second picker WITHOUT capture opens it (a low-memory phone can kill the page each time the camera app opens)
     if (card.restored && !card.photo) {
       var gt = el('label', 'phtile alt'); gt.appendChild(el('span', 'tx', 'เลือกรูปจากคลังภาพ')); sec.appendChild(gt);
       pg = el('input'); pg.type = 'file'; pg.id = 'uphotoPick'; pg.accept = 'image/*'; pg.style.position = 'absolute'; pg.style.left = '-9999px'; gt.appendChild(pg);
@@ -2335,7 +2373,7 @@ if (typeof document !== 'undefined') (function () {
       var k = L.readClass(text, M), now = Date.now();
       $('scanHint').hidden = !hint.feed(k.kind, now);
       if (k.kind === 'ignored') { var rn = scanRej.note(text); if (rn) $('scanNote').textContent = rn; return; }   // a read that is not a part code: say so once (raw text shown), keep scanning
-      if (k.kind !== 'plausible') return;                                   // empty
+      if (k.kind !== 'plausible') return;
       var code = bestRead(k);
       // a read from the whole-frame / strip views can be a neighbour's label: it must be seen twice (like an unknown code) before a card opens; band reads open at once
       if (!L.isWideView(view) && L.findPart(M, code) >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(60); lookup(code, true); syncLayer(); drawInstall(); return; }
@@ -2351,7 +2389,7 @@ if (typeof document !== 'undefined') (function () {
   }
   var pickerOpen = false;   // the iOS/Android photo picker of the scan sheet is open (set on its click, cleared on change / cancel)
   function resumeScanCam() { if (!$('scan').hidden && !document.hidden) startScanCam(); }
-  function closeScan() { scanSession++; try { var dg = $('scanDiag'); if (dg) dg.hidden = true; } catch (e) { /* ignore */ } camStop(); photoUi(''); $('scan').hidden = true; syncLayer(); geoFlush(); drawInstall(); }
+  function closeScan() { scanSession++; try { var dg = $('scanDiag'); if (dg) dg.hidden = true; } catch (e) {} camStop(); photoUi(''); $('scan').hidden = true; syncLayer(); geoFlush(); drawInstall(); }
   function lookup(code, viaScan) {
     if (switchBlocked()) return;
     if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
@@ -2432,11 +2470,11 @@ if (typeof document !== 'undefined') (function () {
   }
   var zxFailAt = 0, zxTag = null;   // when the last ZXing load failed / timed out (no new attempt for 60 s: a retry on every camera frame piled up script tags), and the script tag of the latest attempt
   var ZX_SLOW_MS = 13000, ZX_TIMEOUT_MS = 45000, ZX_RETRY_MS = 60000;
-  /** loadZXing(cb, onSlow): cb(ok) once. A slow network is not a failure: after ZX_SLOW_MS every waiting caller's onSlow() runs ("loading..." on screen, camera stays open) and the wait goes on; only an onerror or ZX_TIMEOUT_MS (45 s) without the script answers cb(false). The late onload of a script still sets window.ZXing for the next call. */
+  /** loadZXing(cb, onSlow): cb(ok) once. A slow network is not a failure: after ZX_SLOW_MS every waiting caller's onSlow() runs (camera stays open) and the wait goes on; only an onerror or ZX_TIMEOUT_MS (45 s) answers cb(false). A late onload still sets window.ZXing for the next call. */
   function loadZXing(cb, onSlow) {
     if (window.ZXing) { cb(true); return; }
     var w = { cb: cb, slow: onSlow };
-    if (zxLoading) { zxLoading.list.push(w); if (zxLoading.slowFired && onSlow) { try { onSlow(); } catch (e1) { /* ignore */ } } return; }
+    if (zxLoading) { zxLoading.list.push(w); if (zxLoading.slowFired && onSlow) { try { onSlow(); } catch (e1) {} } return; }
     if (zxFailAt && Date.now() - zxFailAt < ZX_RETRY_MS) { cb(false); return; }
     var rec = zxLoading = { list: [w], slowFired: false }, finished = false, slowT = null, timer = null;
     var done = function (ok) {
@@ -2445,10 +2483,10 @@ if (typeof document !== 'undefined') (function () {
       if (!ok) zxFailAt = Date.now();
       rec.list.forEach(function (x) { try { x.cb(ok); } catch (e) { /* one caller must not stop the others */ } });
     };
-    slowT = setTimeout(function () { rec.slowFired = true; rec.list.forEach(function (x) { if (x.slow) { try { x.slow(); } catch (e2) { /* ignore */ } } }); }, ZX_SLOW_MS);
+    slowT = setTimeout(function () { rec.slowFired = true; rec.list.forEach(function (x) { if (x.slow) { try { x.slow(); } catch (e2) {} } }); }, ZX_SLOW_MS);
     timer = setTimeout(function () { done(!!window.ZXing); }, ZX_TIMEOUT_MS);   // nothing at all after 45 s: now it is a failure
     try {
-      if (zxTag && zxTag.parentNode) { try { zxTag.parentNode.removeChild(zxTag); } catch (e0) { /* ignore */ } }
+      if (zxTag && zxTag.parentNode) { try { zxTag.parentNode.removeChild(zxTag); } catch (e0) {} }
       var s = zxTag = document.createElement('script');
       s.src = ZXING_URL; s.integrity = ZXING_SRI; s.crossOrigin = 'anonymous';
       s.onload = function () { done(!!window.ZXing); };
@@ -2466,9 +2504,9 @@ if (typeof document !== 'undefined') (function () {
   function camStop() {
     camRun++;
     clearTimeout(cam.timer); cam.timer = null; clearTimeout(camSavedWatch);
-    try { if (cam.stream) cam.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) { /* ignore */ }
+    try { if (cam.stream) cam.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
     cam.stream = null; cam.torch = false;
-    var vs = document.querySelectorAll('video'); for (var i = 0; i < vs.length; i++) { try { vs[i].srcObject = null; } catch (e) { /* ignore */ } }
+    var vs = document.querySelectorAll('video'); for (var i = 0; i < vs.length; i++) { try { vs[i].srcObject = null; } catch (e) {} }
     var tb = document.querySelectorAll('.torch'); for (var j = 0; j < tb.length; j++) { tb[j].hidden = true; tb[j].classList.remove('on'); }
     var sw = document.querySelectorAll('.switchcam'); for (var m = 0; m < sw.length; m++) sw[m].hidden = true;
     var zb = document.querySelectorAll('.zoom'); for (var k = 0; k < zb.length; k++) zb[k].hidden = true;
@@ -2478,7 +2516,7 @@ if (typeof document !== 'undefined') (function () {
     try {
       var track = stream.getVideoTracks()[0], caps = track && track.getCapabilities ? track.getCapabilities() : null;
       if (!caps) return;
-      var apply = function (c) { try { var r = track.applyConstraints({ advanced: [c] }); if (r && r.catch) r.catch(function () { /* not supported: fine */ }); return r; } catch (e) { return null; } };
+      var apply = function (c) { try { var r = track.applyConstraints({ advanced: [c] }); if (r && r.catch) r.catch(function () {}); return r; } catch (e) { return null; } };
       if (caps.focusMode && caps.focusMode.indexOf && caps.focusMode.indexOf('continuous') >= 0) apply({ focusMode: 'continuous' });
       var ios = isIOS(), zp = L.zoomPlan(caps, ios ? 1.75 : 2);   // iOS without a virtual lens: a bit of zoom so the phone can be held farther away; the triple / dual-wide cameras handle close focus themselves (no automatic zoom, the button still works)
       if (zp && zoomBtn) {
@@ -2494,11 +2532,11 @@ if (typeof document !== 'undefined') (function () {
           try { track.applyConstraints({ advanced: [{ torch: cam.torch }] }).then(function () { torchBtn.classList.toggle('on', cam.torch); if (caps.focusMode && caps.focusMode.indexOf && caps.focusMode.indexOf('continuous') >= 0) apply({ focusMode: 'continuous' }); }, function () { cam.torch = false; torchBtn.hidden = true; }); } catch (e) { cam.torch = false; torchBtn.hidden = true; }
         };
       }
-    } catch (e) { /* no extras: fine */ }
+    } catch (e) {}
   }
   function engineSaved() { try { return L.engineSavedValid(localStorage.getItem('sc5.engine'), Date.now()) ? 'zx' : ''; } catch (e) { return ''; } }
-  /** Writes the 7-day "use ZXing" note, but ONLY when native really ran in this page session and was dropped (camEngineSession is set nowhere else), and never again while the note is still valid (re-saving on every use would make it never expire). A getSupportedFormats timeout / no BarcodeDetector never saves. */
-  function engineSave() { if (camEngineSession !== 'zxing' || engineSaved()) return; try { localStorage.setItem('sc5.engine', 'zx:' + Date.now()); } catch (e) { /* ignore */ } }
+  /** Writes the 7-day "use ZXing" note ONLY when native really ran in this page session and was dropped (camEngineSession is set nowhere else), and never again while the note is valid (re-saving would stop it expiring). */
+  function engineSave() { if (camEngineSession !== 'zxing' || engineSaved()) return; try { localStorage.setItem('sc5.engine', 'zx:' + Date.now()); } catch (e) {} }
   var camThrows = 0, camDeviceId = '', camVirtual = false, camWide = false;   // consecutive native detect() failures; the camera chosen earlier in this page session (+ whether it is an iOS triple / dual virtual lens)
   var camList = [];   // [{id,label}]   // Android: deviceIds of the back cameras (best first), for the manual switch button
   var camDiag = { engine: '', frames: 0, t0: 0, natCalls: 0, natHits: 0, zxN: 0, lastRead: 0 };
@@ -2507,14 +2545,14 @@ if (typeof document !== 'undefined') (function () {
   /** camPrefSet only STAGES the lens: it is written to sc5.cam by camPrefCommit() once the camera has produced a decoded read (a lens that opens but reads nothing must not be remembered). */
   var camPrefPending = '', camSavedLens = false, camSavedWatch = null;   // staged camKey; the remembered lens was accepted this session and has not read anything yet; its 10 s timer
   function camPrefSet(id) { camPrefPending = id; }
-  function camPrefCommit() { var id = camPrefPending; camPrefPending = ''; if (!id) return; try { localStorage.setItem('sc5.cam', id); } catch (e) { /* ignore */ } }
-  function camPrefDrop() { camPrefPending = ''; try { localStorage.removeItem('sc5.cam'); } catch (e) { /* ignore */ } }
+  function camPrefCommit() { var id = camPrefPending; camPrefPending = ''; if (!id) return; try { localStorage.setItem('sc5.cam', id); } catch (e) {} }
+  function camPrefDrop() { camPrefPending = ''; try { localStorage.removeItem('sc5.cam'); } catch (e) {} }
   var camPicked = false;   // androidPick finished once in this page session: later sheet opens reuse the camera
   var camBad = {};   // deviceIds whose exact open failed in this page session: never retried
   var camZxHits = 0;   // ZXing-only band reads in a row across camera runs (a card opens after the first one, so a per-run count never reaches 2)
   var camEngineSession = '';   // 'zxing' once the native detector proved useless in this page session
   var CAM_VIDEO = { width: { ideal: 1920 }, height: { ideal: 1080 } };
-  /** getUserMedia for one exact camera. A busy camera (NotReadableError / AbortError: the previous stream is still being released, typical right after the switch button) is retried ONCE on the same id after 500 ms before the caller falls back. */
+  /** getUserMedia for one exact camera; a busy camera (NotReadableError / AbortError: the previous stream is still releasing) is retried ONCE on the same id after 500 ms before the caller falls back. */
   function openCamId(id, wait) {
     var open = function () { return navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: id }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }); };
     return open().catch(function (err) {
@@ -2524,12 +2562,12 @@ if (typeof document !== 'undefined') (function () {
     });
   }
   function isIOS() { try { return L.isIOS(navigator.userAgent, navigator.platform, navigator.maxTouchPoints); } catch (e) { return false; } }
-  /** After permission: on Android multi-lens phones swap facingMode for the main back camera; on iPhone prefer "Back Triple Camera" / "Back Dual Wide Camera" / "Back Dual Camera" (they switch to the macro lens for close focus). Labels are only readable after permission. Always resolves with a usable stream; any error falls back to facingMode environment. */
+  /** After permission: Android multi-lens phones swap facingMode for the main back camera; iPhone prefers "Back Triple Camera" / "Back Dual Wide Camera" / "Back Dual Camera" (macro lens for close focus). Always resolves with a usable stream (any error falls back to facingMode environment). */
   function betterStream(stream, run) {
     return new Promise(function (resolve) {
       try {
         var md = navigator.mediaDevices, tr = stream.getVideoTracks()[0], cur = '';
-        try { cur = (tr && tr.getSettings && tr.getSettings().deviceId) || ''; } catch (e) { /* ignore */ }
+        try { cur = (tr && tr.getSettings && tr.getSettings().deviceId) || ''; } catch (e) {}
         var reopen = function (id, virt, wide) {
           stream.getTracks().forEach(function (t) { t.stop(); });
           openCamId(id).then(function (s2) { camDeviceId = id; camVirtual = !!virt; camWide = !!wide; resolve(s2); }, function (err) {
@@ -2553,14 +2591,14 @@ if (typeof document !== 'undefined') (function () {
       } catch (e) { resolve(stream); }
     });
   }
-  /** Android: open the remembered (sc5.cam, by label) or the best back camera that can focus. Each tested lens is closed again; the first with continuous focus wins, else the widest-sensor one that is not fixed, else the first. Always resolves with a stream (or null). */
+  /** Android: open the remembered (sc5.cam, by label) or the best back camera that can focus; each tested lens is closed again; first with continuous focus wins, else the widest non-fixed one, else the first. Always resolves (stream or null). */
   function androidPick(list, stream, cur, run, resolve) {
     var md = navigator.mediaDevices, order = list.filter(function (c) { return !camBad[c.id]; }), curStream = stream, curId = cur, i = 0, tested = [], MAXT = 4;
     if (!order.length) { resolve(stream); return; }
     var anyFail = false;
     var saved = null; try { saved = L.matchCam(order, camPrefGet()); } catch (e) { saved = null; }
     if (saved) { order.splice(order.indexOf(saved), 1); order.unshift(saved); }   // a remembered choice is tried first and kept as long as it opens (it is the owner's/auto-picked pick)
-    var stopS = function (s) { try { if (s) s.getTracks().forEach(function (t) { t.stop(); }); } catch (e) { /* ignore */ } };
+    var stopS = function (s) { try { if (s) s.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} };
     var done = function (c, s) { camPicked = true; camDeviceId = c.id; camVirtual = false; camWide = false; resolve(s); };
     var envFallback = function () { camPicked = true; camDeviceId = ''; md.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: CAM_VIDEO.width, height: CAM_VIDEO.height }, audio: false }).then(resolve, function () { resolve(null); }); };
     var openExact = function (c, ok, bad, retried) {
@@ -2587,7 +2625,7 @@ if (typeof document !== 'undefined') (function () {
         if (run !== camRun) { resolve(s); return; }
         var caps = null; try { var t = s.getVideoTracks()[0]; caps = t && t.getCapabilities ? t.getCapabilities() : null; } catch (e) { caps = null; }
         var fixed = false, cont = false, w = 0;
-        try { fixed = L.fixedFocus(caps); cont = !!(caps && Array.isArray(caps.focusMode) && caps.focusMode.indexOf('continuous') >= 0); w = (caps && caps.width && Number(caps.width.max)) || 0; } catch (e) { /* ignore */ }
+        try { fixed = L.fixedFocus(caps); cont = !!(caps && Array.isArray(caps.focusMode) && caps.focusMode.indexOf('continuous') >= 0); w = (caps && caps.width && Number(caps.width.max)) || 0; } catch (e) {}
         if (c === saved && !fixed && (cont || !caps)) { camSavedLens = true; done(c, s); return; }   // a remembered lens is trusted only if it still shows continuous focus (capabilities unknown = trusted); otherwise it is tested like the others. camSavedLens: dropped if it reads nothing in 10 s
         if (cont && !fixed) { if (!anyFail) camPrefSet(L.camKey(c.label)); done(c, s); return; }
         tested.push({ c: c, fixed: fixed, w: w }); i++;
@@ -2602,7 +2640,7 @@ if (typeof document !== 'undefined') (function () {
     step();
   }
   var viewCv = null, stripCv = null;   // separate canvases: the strip view (native detector) and the ZXing views are never resized into each other
-  /** Another view of the live video for ZXing: 'full' = the whole frame (shrunk to 960 px on the long edge), 'rot' = the central vertical strip turned 90 degrees (a barcode held sideways). Full resolution, one reused canvas. */
+  /** Another view of the live video for ZXing: 'full' = whole frame (shrunk to 960 px long edge), 'rot' = central vertical strip turned 90 degrees (barcode held sideways). One reused canvas. */
   function viewCanvas(video, kind) {
     var vw = video.videoWidth, vh = video.videoHeight, strip = kind === 'strip', c = strip ? (stripCv || (stripCv = document.createElement('canvas'))) : (viewCv || (viewCv = document.createElement('canvas'))), x;
     try { x = c.getContext('2d', { willReadFrequently: true }); } catch (e) { x = c.getContext('2d'); }
@@ -2627,11 +2665,11 @@ if (typeof document !== 'undefined') (function () {
         if (run !== camRun) return;
         if (!ok) { if (!st.det || st.nativeBad) onNoLib(); cb && cb(false); return; }
         st.hints = st.hints || L.zxHints(window.ZXing, false); st.zx = true;
-        if (st.slowShown) { st.slowShown = false; try { eo.onWait && eo.onWait(false); } catch (e1) { /* ignore */ } }   // the late onload arrived: the "loading" line goes, scanning starts
+        if (st.slowShown) { st.slowShown = false; try { eo.onWait && eo.onWait(false); } catch (e1) {} }   // the late onload arrived: the "loading" line goes, scanning starts
         cb && cb(true);
       }, function () {   // 13 s without the library: the camera stays open and says so (a slow network is not a failure); only when ZXing is the engine in use
         if (run !== camRun || (st.det && !st.nativeBad)) return;
-        st.slowShown = true; try { eo.onWait && eo.onWait(true); } catch (e2) { /* ignore */ }
+        st.slowShown = true; try { eo.onWait && eo.onWait(true); } catch (e2) {}
       });
     };
     // ZXing sees a different view on each frame: the centre band, the whole frame, the band inverted (white-on-black labels), a vertical strip rotated 90 degrees
@@ -2689,7 +2727,7 @@ if (typeof document !== 'undefined') (function () {
     try { sf.call(window.BarcodeDetector).then(fin, function () { fin([]); }); } catch (e) { fin([]); }
     setTimeout(function () { fin([]); }, 1500);   // a slow getSupportedFormats only means ZXing for THIS open: nothing is remembered (no camEngineSession, no sc5.engine), the next open asks again
   }
-  /** onFrame(text) gets every decode result ('' = nothing). opts: {torch, zoom, frame (the viewfinder element: its shape follows the decoded band), onIdle (called once when nothing was read for ~8 s)} */
+  /** onFrame(text) gets every decode result ('' = nothing). opts: {torch, zoom, frame (the viewfinder element, shaped like the decoded band), onIdle (once, when nothing was read for ~8 s)} */
   function camStart(video, onFrame, onFail, opts) {
     opts = opts || {};
     camStop();
@@ -2717,7 +2755,7 @@ if (typeof document !== 'undefined') (function () {
             camDiag.frames++; if (text) camDiag.lastRead = Date.now();
             if (text) { camPrefCommit(); camSavedLens = false; clearTimeout(camSavedWatch); }   // the lens produced a read: now it may be remembered
             if (text) idleDone = true;
-            else if (!idleDone && opts.onIdle && Date.now() > idleAt) { idleDone = true; try { opts.onIdle(); } catch (e2) { /* ignore */ } }
+            else if (!idleDone && opts.onIdle && Date.now() > idleAt) { idleDone = true; try { opts.onIdle(); } catch (e2) {} }
             onFrame(text, view);
           };
           if (camSavedLens) { clearTimeout(camSavedWatch); camSavedWatch = setTimeout(function () { if (run === camRun && camSavedLens) { camSavedLens = false; camPrefDrop(); } }, 10000); }   // the remembered lens read nothing in 10 s with the sheet open: forget it, the next session tests the lenses again
@@ -2737,18 +2775,18 @@ if (typeof document !== 'undefined') (function () {
           if (run !== camRun || !caps.pointsOfInterest) return;
           var r = video.getBoundingClientRect(), x = Math.min(1, Math.max(0, (ev.clientX - r.left) / (r.width || 1))), y = Math.min(1, Math.max(0, (ev.clientY - r.top) / (r.height || 1)));
           var c = { pointsOfInterest: [{ x: x, y: y }] }; if (caps.focusMode && caps.focusMode.indexOf && caps.focusMode.indexOf('single-shot') >= 0) c.focusMode = 'single-shot';
-          var p = track.applyConstraints({ advanced: [c] }); if (p && p.catch) p.catch(function () { /* ignore */ });
+          var p = track.applyConstraints({ advanced: [c] }); if (p && p.catch) p.catch(function () {});
           clearTimeout(backToCont);
           backToCont = setTimeout(function () {
-            try { if (run === camRun && caps.focusMode && caps.focusMode.indexOf('continuous') >= 0) { var q = track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); if (q && q.catch) q.catch(function () { /* ignore */ }); } } catch (e2) { /* ignore */ }
+            try { if (run === camRun && caps.focusMode && caps.focusMode.indexOf('continuous') >= 0) { var q = track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); if (q && q.catch) q.catch(function () {}); } } catch (e2) {}
           }, 1500);
-        } catch (e1) { /* ignore */ }
+        } catch (e1) {}
       };
     }
     if (opts.tapFocus && track && caps && Array.isArray(caps.focusMode) && caps.focusMode.indexOf('single-shot') >= 0 && caps.focusMode.indexOf('continuous') < 0) {   // only single-shot offered: re-trigger it every ~2 s while nothing is read
       var again = function () {
         if (run !== camRun) return;
-        try { if (Date.now() - camDiag.lastRead > 2000) { var q = track.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] }); if (q && q.catch) q.catch(function () { /* ignore */ }); } } catch (e4) { /* ignore */ }
+        try { if (Date.now() - camDiag.lastRead > 2000) { var q = track.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] }); if (q && q.catch) q.catch(function () {}); } } catch (e4) {}
         setTimeout(again, 2000);
       };
       setTimeout(again, 2000);
@@ -2762,7 +2800,7 @@ if (typeof document !== 'undefined') (function () {
           if (!nx) return;
           camDeviceId = nx; var ne = camList.filter(function (c) { return c.id === nx; })[0]; if (ne) camPrefSet(L.camKey(ne.label)); camVirtual = false; camWide = false;
           if (opts.onSwitch) opts.onSwitch();
-        } catch (e3) { /* ignore */ }
+        } catch (e3) {}
       };
     }
   }
@@ -2773,8 +2811,8 @@ if (typeof document !== 'undefined') (function () {
       if (run !== camRun) return;
       var again = function () { if (run === camRun) cam.timer = setTimeout(tick, 100); };
       var vw = video.videoWidth, vh = video.videoHeight;
-      if (!vw || !vh) { if (onIdle && Date.now() > idleAt) { var oi = onIdle; onIdle = null; try { oi(); } catch (e3) { /* ignore */ } } again(); return; }
-      var fin = false, wd = null, finish = function (text, view) { if (fin) return; fin = true; clearTimeout(wd); if (run === camRun) { try { onFrame(text, view); } catch (e1) { /* ignore */ } } again(); };   // the ONLY way a tick continues: callable any number of times, continues once
+      if (!vw || !vh) { if (onIdle && Date.now() > idleAt) { var oi = onIdle; onIdle = null; try { oi(); } catch (e3) {} } again(); return; }
+      var fin = false, wd = null, finish = function (text, view) { if (fin) return; fin = true; clearTimeout(wd); if (run === camRun) { try { onFrame(text, view); } catch (e1) {} } again(); };   // the ONLY way a tick continues: callable any number of times, continues once
       try {
         var r = L.bandRect(vw, vh);
         if (!ctx) { try { ctx = canvas.getContext('2d', { willReadFrequently: true }); } catch (e0) { ctx = canvas.getContext('2d'); } }
@@ -2793,7 +2831,7 @@ if (typeof document !== 'undefined') (function () {
     try {
       var tr = cam.stream && cam.stream.getVideoTracks()[0], st = tr && tr.getSettings ? tr.getSettings() : {};
       o.label = (tr && tr.label) || ''; o.w = st.width; o.h = st.height; o.zoom = st.zoom; o.focus = st.focusMode;
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
     return L.diagLine(o);
   }
   /** show / hide the one-line diagnostic and keep it fresh once a second while the scan sheet is open */
@@ -2811,18 +2849,17 @@ if (typeof document !== 'undefined') (function () {
   }
   var PHOTO_FAIL = 'อ่านบาร์โค้ดจากรูปไม่ได้ — ลองถ่ายใกล้ขึ้น หรือพิมพ์รหัส';
   var photoDecoding = false;   // a photo is being decoded: nothing may start the live camera until decodePhoto has called back
-  /** photo of a barcode -> text, decoded on the phone. cb(text) or cb('', thaiReason) - called EXACTLY once, whatever happens (bad image, no memory, no library, 30 s timeout); photoDecoding is cleared right before that call.
-   *  Views come from L.photoViewPlan: centre band, tiles and the 2000 px whole picture at NATIVE detail, then turned / inverted, time-boxed (L.PHOTO_BUDGET_MS), yielding to the page between views. */
+  /** photo of a barcode -> text, decoded on the phone. cb(text) or cb('', thaiReason), called EXACTLY once whatever happens (bad image, no memory, no library, 30 s timeout); photoDecoding is cleared right before. Views from L.photoViewPlan at native detail, time-boxed (L.PHOTO_BUDGET_MS), yielding to the page between views. */
   function decodePhoto(file, cb) {
     var done = false, url = '', timer = null, img = null;
     photoDecoding = true;
     var fin = function (t, why) {
       if (done) return; done = true; clearTimeout(timer); photoDecoding = false;
       if (img) { img.onload = img.onerror = null; }
-      if (url) { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } }
+      if (url) { try { URL.revokeObjectURL(url); } catch (e) {} }
       try { cb(t || '', t ? undefined : (why || PHOTO_FAIL)); } catch (e2) { /* the caller's problem; never rethrow into the event loop */ }
       // the scan sheet was opened while this (other) decode ran and shows 'busy': its own handler already settled the display if it started this decode, so a busy still showing is stale
-      try { if (!$('scan').hidden && !$('scanBusy').hidden) { photoUi(''); resumeScanCam(); } } catch (e3) { /* ignore */ }
+      try { if (!$('scan').hidden && !$('scanBusy').hidden) { photoUi(''); resumeScanCam(); } } catch (e3) {}
     };
     try {
       timer = setTimeout(function () { fin('', PHOTO_FAIL); }, 30000);
@@ -2846,7 +2883,7 @@ if (typeof document !== 'undefined') (function () {
     var iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, t0 = Date.now();
     var plan = L.photoViewPlan(iw, ih), det = makeDetector(L.ONE_D_NATIVE.concat(['qr_code'])), Z = null, i = 0;
     var next = function () { setTimeout(step, 0); };
-    var release = function (c) { try { c.width = c.height = 0; } catch (e) { /* ignore */ } };
+    var release = function (c) { try { c.width = c.height = 0; } catch (e) {} };
     var qrPass = function () {
       if (isDone()) return;
       // no 1D barcode in any view: a QR (link) is better than nothing, so the caller can say "that is not a part code"
@@ -2927,10 +2964,10 @@ if (typeof document !== 'undefined') (function () {
         }
       } catch (e) { data = null; }
       if (typeof data !== 'string' || data.length < 1000 || data.indexOf('data:image/jpeg') !== 0) data = null;   // a blank or non-JPEG canvas result (some browsers return 'data:,' or a PNG) is a failure, never a photo
-      try { URL.revokeObjectURL(url); } catch (e2) { /* ignore */ }
+      try { URL.revokeObjectURL(url); } catch (e2) {}
       cb(data);
     };
-    img.onerror = function () { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } cb(null); };
+    img.onerror = function () { try { URL.revokeObjectURL(url); } catch (e) {} cb(null); };
     img.src = url;
   }
   function dailyCard(it) {
@@ -2956,7 +2993,10 @@ if (typeof document !== 'undefined') (function () {
     crates.value = st.crates; per.value = st.per; loose.value = st.loose;
     total = el('div', 'total', 'รวม 0 ชิ้น'); c.appendChild(total);
     var recalc = function () { total.textContent = 'รวม ' + ((+crates.value || 0) * (+per.value || 0) + (+loose.value || 0)) + ' ชิ้น'; };
-    [crates, per, loose].forEach(function (i) { i.addEventListener('input', function () { st.crates = crates.value; st.per = per.value; st.loose = loose.value; recalc(); ddSave(); }); }); recalc();
+    // each box updates ONLY its own field of the draft (a card that was not redrawn after a restore has empty boxes: copying all three would wipe the restored values)
+    crates.addEventListener('input', function () { st.crates = crates.value; recalc(); ddSave(); });
+    per.addEventListener('input', function () { st.per = per.value; recalc(); ddSave(); });
+    loose.addEventListener('input', function () { st.loose = loose.value; recalc(); ddSave(); }); recalc();
 
     var fld = el('div', 'field'); c.appendChild(fld);
     var pick = el('label', 'fbtn tint wide', ''); pick.appendChild(ic('camera')); var pl = el('span', '', 'ถ่ายรูป'); pick.appendChild(pl); fld.appendChild(pick);
@@ -3002,7 +3042,7 @@ if (typeof document !== 'undefined') (function () {
     $('locPick').addEventListener('change', function () {
       if (card && M && M.loc && this.value !== M.loc) { this.value = M.loc; toast('บันทึกหรือกลับก่อน'); return; }   // an open card (pieces, unknown photo + draft) is never thrown away by a place switch
       switchLoc(this.value, false);
-    });   // v7: a roaming person goes to another location: a fresh list from the server for it
+    });   // a roaming person goes to another location: a fresh list from the server for it
     $('scanBtn').addEventListener('click', openScan);
     $('scanClose').addEventListener('click', closeScan);
     try { wireDiag(); } catch (eD) { /* diagnostics are optional */ }
@@ -3011,7 +3051,7 @@ if (typeof document !== 'undefined') (function () {
     $('scanFile').addEventListener('change', function () {
       var inp = this, f = inp.files && inp.files[0]; pickerOpen = false;
       if (!f) { inp.value = ''; resumeScanCam(); return; }
-      if (photoDecoding) { inp.value = ''; $('scanNote').textContent = 'กำลังอ่านรูปก่อนหน้า…'; return; }   // one photo at a time
+      if (photoDecoding) { inp.value = ''; $('scanNote').textContent = 'กำลังอ่านรูปก่อนหน้า…'; return; }
       camStop(); photoUi('busy'); $('scanNote').textContent = 'เล็งบาร์โค้ดให้อยู่ในกรอบ';
       var mySession = scanSession;
       decodePhoto(f, function (text, why) {
@@ -3023,11 +3063,11 @@ if (typeof document !== 'undefined') (function () {
         else { photoUi('fail'); $('scanNote').textContent = text ? (/:\/\/|www\./i.test(text) ? NOT_A_PART : L.rejectMsg(text)) : (why || PHOTO_FAIL); }   // stay on the sheet: the live camera is NOT restarted under the message
       });
     });
-    $('scanRetake').addEventListener('click', function () { $('scanFile').click(); });   // a new photo
+    $('scanRetake').addEventListener('click', function () { $('scanFile').click(); });
     $('scanLive').addEventListener('click', function () { startScanCam(); });             // the person chose the live camera again
     $('tabFirst').addEventListener('click', function () { ST.tab = 'first'; ST.shelf = ''; renderChips(); renderList(); });
     $('tabSecond').addEventListener('click', function () { ST.tab = 'second'; ST.shelf = ''; renderChips(); renderList(); });
-    $('scanBackdrop').addEventListener('click', closeScan);   // same as the X button
+    $('scanBackdrop').addEventListener('click', closeScan);
     $('uncHead').addEventListener('click', function () { ST.expanded = !ST.expanded; renderList(); });   // collapse / expand the uncounted list (presentation only)
     $('codeGo').addEventListener('click', goCode);
     $('codeIn').addEventListener('input', function () { sugHint = false; renderSug(); });
@@ -3039,7 +3079,7 @@ if (typeof document !== 'undefined') (function () {
     $('qbadge').addEventListener('click', function () { if (Q.length) { Q.forEach(function (e) { e.next = 0; }); pump(); toast('กำลังลองส่งใหม่'); } });
     // the camera must never stay on: closed with the scan sheet, and whenever the page is hidden or left
     document.addEventListener('visibilitychange', function () {
-      if (document.hidden) { camStop(); return; }
+      if (document.hidden) { flushList(false); camStop(); return; }
       geoCheck();
       if (!$('scan').hidden && pickerOpen) { pump(); setTimeout(function () { if (pickerOpen) { pickerOpen = false; resumeScanCam(); } }, 2500); return; }   // back from the photo picker: the picture's change event follows (do not restart the camera under the decode); if none comes (cancel not reported), restart anyway
       if (!$('scan').hidden) { if ($('scanFail').hidden) startScanCam(); pump(); return; }   // the viewfinder went black while the page was hidden (not while a photo failure message waits for the person; startScanCam itself refuses while a photo is being read)
@@ -3047,7 +3087,7 @@ if (typeof document !== 'undefined') (function () {
       if (verified && Date.now() - loadedAt > 60000) doSync(false);
       pump();
     });
-    window.addEventListener('pagehide', camStop);
+    window.addEventListener('pagehide', function () { flushList(false); camStop(); });
     window.addEventListener('popstate', onLayerPop);
     window.addEventListener('storage', onQueueStorage);   // a second window of this link wrote the queue: take over its new entries (see mergeStored)
     // another link opened in this tab (a shared phone): ALWAYS start over with it. If the waiting saves exist only in memory (no storage), nothing may be lost:
@@ -3058,10 +3098,10 @@ if (typeof document !== 'undefined') (function () {
       if (Q.length && !(verified && !paused) && (noStore || memOnlyPhotos())) { keepOldLink(); return; }   // the pad is showing and the waiting saves live only in memory: nothing can be sent now and a reload would lose them - stay on the OLD link (a wait screen here would never end)
       if (Q.length && verified && !paused) {
         reloadWhenEmpty = true;
-        try { bioOfferClose(); } catch (e) { /* fine */ }
-        try { if (!$('scan').hidden) closeScan(); } catch (e) { /* fine */ }
-        try { closeSettings(); } catch (e) { /* fine */ }
-        try { camStop(); backHome(); } catch (e) { /* fine */ }   // no open card / scan sheet / Face ID offer of the OLD link behind the wait screen
+        try { bioOfferClose(); } catch (e) {}
+        try { if (!$('scan').hidden) closeScan(); } catch (e) {}
+        try { closeSettings(); } catch (e) {}
+        try { camStop(); backHome(); } catch (e) {}   // no open card / scan sheet / Face ID offer of the OLD link behind the wait screen
         $('app').hidden = true; $('pad').hidden = true; $('xwarn').hidden = true; $('waitq').hidden = false; drawInstall();
         waitFrom = Date.now();
         reloadWatch();   // (a path that empties the queue without going through sent() still ends the wait)
@@ -3081,7 +3121,7 @@ if (typeof document !== 'undefined') (function () {
       var l = document.createElement('link'); l.rel = 'stylesheet';
       l.href = 'https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600&family=Roboto:wght@400;500&family=Roboto+Mono:wght@400&display=swap';
       document.head.appendChild(l);
-    } catch (e) { /* system fonts: fine */ }
+    } catch (e) {}
   }
   /** keep the page behind the scan sheet from scrolling while it is open */
   function watchSheet() {
@@ -3089,7 +3129,7 @@ if (typeof document !== 'undefined') (function () {
       if (typeof MutationObserver === 'undefined') return;
       var sc = $('scan'), sync = function () { document.body.classList.toggle('sheet-open', !sc.hidden); };
       new MutationObserver(sync).observe(sc, { attributes: true, attributeFilter: ['hidden'] }); sync();
-    } catch (e) { /* no scroll lock: fine */ }
+    } catch (e) {}
   }
 
   /* ---- "add to home screen" pop-up (iPhone + Android): one card, never when already installed ---- */
@@ -3117,10 +3157,10 @@ if (typeof document !== 'undefined') (function () {
   /** a text field has the keyboard: the card would cover what is being typed */
   function a2Typing() {
     if (!a2Focus) return false;
-    try { var ae = document.activeElement; if (ae && ae.tagName && !/^(INPUT|SELECT|TEXTAREA)$/i.test(ae.tagName)) return false; } catch (e) { /* trust the flag */ }
+    try { var ae = document.activeElement; if (ae && ae.tagName && !/^(INPUT|SELECT|TEXTAREA)$/i.test(ae.tagName)) return false; } catch (e) {}
     return true;
   }
-  /** the page gets bottom padding as tall as the card (its real height + its offset + the safe area + 16 px) so the last row can scroll clear of it; the toast rides above it (--a2top). Cleared when the card is hidden. */
+  /** the page gets bottom padding as tall as the card (height + offset + safe area + 16 px) so the last row can scroll clear of it; the toast rides above it (--a2top). Cleared when the card hides. */
   function a2Pad(box, on) {
     try {
       var b = document.body; if (!b) return;
@@ -3130,7 +3170,7 @@ if (typeof document !== 'undefined') (function () {
       var h = Number(box.offsetHeight) || 300, off = box.classList.contains('a2hi') ? 72 : 12;
       st.paddingBottom = 'calc(env(safe-area-inset-bottom, 0px) + ' + Math.round(h + off + 16) + 'px)';
       if (st.setProperty) st.setProperty('--a2top', 'calc(env(safe-area-inset-bottom, 0px) + ' + Math.round(h + off + 10) + 'px)');
-    } catch (e) { /* the card still works */ }
+    } catch (e) {}
   }
   function drawA2hs() {
     var box = $('a2hs'); if (!box) return;
@@ -3201,12 +3241,12 @@ if (typeof document !== 'undefined') (function () {
       $('a2Later').addEventListener('click', function () { a2Later = true; store.set(KA2, L.bkkDay(Date.now())); drawInstall(); });   // hidden until tomorrow (Bangkok date); this page load too if storage refuses
       $('a2Got').addEventListener('click', function () { a2Got = true; drawInstall(); });   // hidden for this page load only
     }
-    try { if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { scope: './' }).catch(function () { /* the app works without it */ }); } catch (e) { /* fine */ }
+    try { if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { scope: './' }).catch(function () { /* the app works without it */ }); } catch (e) {}
     drawInstall();
   }
   function start() {
     // LINE (Android) can hand the link to the real browser: try once; the query string stops a loop, the #hash is kept
-    try { if (L.isLineAndroid(navigator.userAgent) && typeof location.replace === 'function' && !/[?&]openExternalBrowser=/.test(String(location.href).split('#')[0])) { location.replace(location.pathname + '?openExternalBrowser=1' + location.hash); return; } } catch (e) { /* stay here */ }
+    try { if (L.isLineAndroid(navigator.userAgent) && typeof location.replace === 'function' && !/[?&]openExternalBrowser=/.test(String(location.href).split('#')[0])) { location.replace(location.pathname + '?openExternalBrowser=1' + location.hash); return; } } catch (e) {}
     applyFont(); loadFonts(); watchSheet();
     try { wireInstall(); } catch (e) { /* the app works without it */ }
     if (L.isLineBrowser(navigator.userAgent)) $('linebanner').hidden = false;   // LINE's in-app browser cannot use the camera
@@ -3217,11 +3257,11 @@ if (typeof document !== 'undefined') (function () {
     lostList = all.filter(function (e) { return e.lostPhoto; });
     Q = all.filter(function (e) { return !e.lostPhoto; });
     if (lostList.length) persistQ();
-    try { if (L.otherQueueTokens(store.keys(), T.t, function (k) { return store.get(k); }).length) notes.push({ id: 'otherq', kind: 'info', text: 'เครื่องนี้มีการนับที่ยังไม่ได้ส่งจากลิงก์อื่น กรุณาเปิดลิงก์เดิมของงานนั้นเพื่อส่งให้เสร็จ' }); } catch (e) { /* no note: fine */ }
-    try { var raw = store.get(KL); cachedBoot = raw ? JSON.parse(raw) : null; } catch (e) { cachedBoot = null; }
+    try { if (L.otherQueueTokens(store.keys(), T.t, function (k) { return store.get(k); }).length) notes.push({ id: 'otherq', kind: 'info', text: 'เครื่องนี้มีการนับที่ยังไม่ได้ส่งจากลิงก์อื่น กรุณาเปิดลิงก์เดิมของงานนั้นเพื่อส่งให้เสร็จ' }); } catch (e) {}
+    cachedRaw = store.get(KL) || '';
     // a link to ANOTHER deployment than the one this phone used before: a red warning, no pad (nothing is sent), until a deliberate second tap
     if (L.checkExec(store.get(KX), T.x) === 'differs') {
-      cachedBoot = null; $('xwarn').hidden = false;
+      cachedBoot = null; cachedRaw = ''; $('xwarn').hidden = false;
       var go = $('xgo'), confirmed = false;
       go.addEventListener('click', function () {
         if (!confirmed) { confirmed = true; go.textContent = 'แตะอีกครั้งเฉพาะเมื่อเจ้าของส่งลิงก์นี้ให้คุณจริงๆ'; return; }

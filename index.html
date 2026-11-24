@@ -174,7 +174,7 @@ button.item:active, .lrow:active { background:var(--hover); }
 .fbig .pcode { font-size:24px; }
 .fbig .pname, .fbig .nm { font-size:23px; }
 .fbig .bigq { font-size:64px; }
-.fbig .stepper .of input, .fbig .row3 .of input, .fbig .qtyone .of input { font-size:28px; }
+.fbig .stepper .of input, .fbig .row3 .of input { font-size:28px; }
 .fbig .prog .num, .fbig .prog .pct { font-size:28px; }
 .fbig .sbhead .t1 { font-size:16px; }
 .fbig .sbhead .t2 { font-size:23px; }
@@ -239,7 +239,6 @@ input[type=search] { -webkit-appearance:none; appearance:none; }
 .cb input:focus-visible + .box { outline:2px solid var(--primary); outline-offset:3px; }
 .fldwrap { padding:18px 16px 14px; }
 .fldstack { display:flex; flex-direction:column; gap:20px; padding:20px 16px 16px; }
-.fl { display:block; font-size:13px; color:var(--mute); margin:0 0 6px; }
 
 /* banners and messages */
 .banner, .refused { display:flex; gap:10px; align-items:flex-start; border-radius:12px; padding:10px 14px; font-size:14px; line-height:1.5; }
@@ -286,7 +285,6 @@ input[type=search] { -webkit-appearance:none; appearance:none; }
 .chk { width:20px; height:20px; color:var(--ok); }
 .dot { width:8px; height:8px; border-radius:50%; flex:none; margin:0 6px; background:var(--amber); }
 .empty { padding:16px; text-align:center; font-size:14px; color:var(--mute); }
-.panel > .more { padding:12px 16px; font-size:13px; color:var(--mute); text-align:center; }
 
 /* code suggestions under the typed-code field */
 .sug { display:flex; flex-direction:column; gap:8px; margin-top:-4px; }
@@ -336,14 +334,12 @@ input[type=search] { -webkit-appearance:none; appearance:none; }
 .step:active { filter:brightness(.93); }
 .stepper .of { width:120px; padding:0; }
 .stepper .of input { text-align:center; font-size:24px; font-weight:500; font-family:"Roboto",var(--sans); min-height:52px; }
-.rad { width:20px; height:20px; border-radius:50%; border:2px solid var(--mute); flex:none; }
 .card > .vf { margin-top:12px; }
 .card > .msg { margin-top:10px; }
 .total { margin-top:10px; font-weight:500; text-align:center; }
 .row3 { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:6px; }
 .row3 .of { padding:0 8px; }
-.row3 .of input, .qtyone .of input { text-align:center; font-size:22px; font-weight:500; font-family:"Roboto",var(--sans); }
-.qtyone { margin-top:12px; }
+.row3 .of input { text-align:center; font-size:22px; font-weight:500; font-family:"Roboto",var(--sans); }
 .nm { font-size:20px; font-weight:600; line-height:1.35; margin:0; }
 .photo-prev { display:none; width:100%; max-height:180px; object-fit:cover; border-radius:12px; margin-top:10px; }
 .spaced { margin-top:12px; }
@@ -485,7 +481,7 @@ body.a2on .toast { bottom:var(--a2top, 340px); }   /* the toast rides above the 
 
   <div id="pad" class="pad" hidden>
     <div class="tile"><svg class="ic" aria-hidden="true"><use href="#i-scan-barcode"/></svg></div>
-    <h1 id="padTitle">นับสต็อก</h1>
+    <h1>นับสต็อก</h1>
     <div class="sub" id="padSub">ใส่รหัส PIN 4 หลัก</div>
     <div class="dots" id="dots" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
     <div class="padmsg" id="padMsg" role="alert"></div>
@@ -617,7 +613,7 @@ body.a2on .toast { bottom:var(--a2top, 340px); }   /* the toast rides above the 
         <div class="card sbcard" id="sb" hidden></div>
         <div id="blocked" class="big-msg" hidden></div>
         <div id="tools" class="stack">
-          <div class="seg" id="homeTabs" role="tablist"><button type="button" class="segb" role="tab" id="tabFirst" aria-selected="true"><svg class="ic segck" aria-hidden="true"><use href="#i-check"/></svg><span class="lb">นับครั้งแรก</span></button><button type="button" class="segb" role="tab" id="tabSecond" aria-selected="false"><svg class="ic segck" aria-hidden="true"><use href="#i-check"/></svg><span class="lb">ต้องนับซ้ำ<span class="badge zero" id="tabSecondN">0</span></span></button></div>
+          <div class="seg" role="tablist"><button type="button" class="segb" role="tab" id="tabFirst" aria-selected="true"><svg class="ic segck" aria-hidden="true"><use href="#i-check"/></svg><span class="lb">นับครั้งแรก</span></button><button type="button" class="segb" role="tab" id="tabSecond" aria-selected="false"><svg class="ic segck" aria-hidden="true"><use href="#i-check"/></svg><span class="lb">ต้องนับซ้ำ<span class="badge zero" id="tabSecondN">0</span></span></button></div>
           <button type="button" class="pbtn" id="scanBtn"><svg class="ic" aria-hidden="true"><use href="#i-scan-barcode"/></svg>สแกนบาร์โค้ด</button>
           <div class="searchrow">
             <label class="of"><input type="text" id="codeIn" placeholder="พิมพ์รหัสอะไหล่" autocomplete="off" autocapitalize="characters" aria-label="พิมพ์รหัสอะไหล่" aria-controls="codeSug" aria-expanded="false"></label>
@@ -677,7 +673,7 @@ body.a2on .toast { bottom:var(--a2top, 340px); }   /* the toast rides above the 
       <div id="scanNote" class="sub">เล็งบาร์โค้ดให้อยู่ในกรอบ</div>
       <div id="scanBusy" class="busy" role="status" hidden><span class="spinner" aria-hidden="true"></span><span>กำลังอ่านบาร์โค้ดจากรูป…</span></div>
       <div id="scanFail" class="stack" hidden><button type="button" class="pbtn" id="scanRetake">ถ่ายใหม่</button><button type="button" class="tbtn c" id="scanLive">เปิดกล้องสดอีกครั้ง</button></div>
-      <label class="tbtn c" id="scanPhoto"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg><span>ถ่ายรูปบาร์โค้ดแทน</span><input type="file" id="scanFile" accept="image/*" capture="environment"></label>
+      <label class="tbtn c"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg><span>ถ่ายรูปบาร์โค้ดแทน</span><input type="file" id="scanFile" accept="image/*" capture="environment"></label>
       <div class="sub">ถ้ากล้องสดเปิดไม่ได้ ให้ถ่ายรูปบาร์โค้ด หรือปิดหน้านี้แล้วพิมพ์รหัสแทน</div>
     </div>
   </div>
@@ -695,6 +691,6 @@ body.a2on .toast { bottom:var(--a2top, 340px); }   /* the toast rides above the 
   <div class="toast" id="toast" role="status" hidden></div>
 </div>
 <!-- BUMP the ?v= number below every time web/app.js changes (stale-JS guard: GitHub Pages caches 10 min, new HTML + old JS = blank page) -->
-<script src="app.js?v=2026112402"></script>
+<script src="app.js?v=2026112404"></script>
 </body>
 </html>
