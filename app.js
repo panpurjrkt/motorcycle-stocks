@@ -234,7 +234,7 @@ var StockLib = (function () {
   L.dailyCount = function (done, total) { return total > 0 && done >= total ? { full: true } : { full: false, done: done, total: total }; };
 
   /* ---- Settings page (the gear): pure helpers ---- */
-  L.APP_VERSION = '2026112404';   // = the ?v= number on app.js in index.html (bump both together)
+  L.APP_VERSION = '2026112601';   // = the ?v= number on app.js in index.html (bump both together)
   /** The ?v= number in the address of a script (null when there is none): '.../app.js?v=2026112403' -> '2026112403'. */
   L.srcVersion = function (src) { var m = /[?&]v=([^&#]*)/.exec(str(src)); return m ? m[1] : null; };
   /** After a deploy the CDN can serve an OLD index.html with the NEW app.js (or the reverse) for about 10 minutes: true when this script's own ?v= differs from the version inside it. No ?v= (or no script found) = nothing to compare = false. */
@@ -997,6 +997,8 @@ if (typeof document !== 'undefined') (function () {
   document.addEventListener('pointerdown', unlockAudio, { once: true, passive: true });
   document.addEventListener('touchend', unlockAudio, { once: true, passive: true });
   document.addEventListener('click', unlockAudio, { once: true, passive: true });
+  /* iPhone shows :active (the pressed look) only when a touchstart listener exists on the element or an ancestor: a passive no-op on the screen roots. Never on document / window / body. */
+  ['splash', 'pad', 'app', 'scan', 'bioOffer', 'xwarn'].forEach(function (id) { try { var n = $(id); if (n && n.addEventListener) n.addEventListener('touchstart', function () {}, { passive: true }); } catch (e) {} });
   function beep() {
     try {
       if (!actx) unlockAudio();
@@ -1008,9 +1010,17 @@ if (typeof document !== 'undefined') (function () {
     } catch (e) { /* no sound: fine */ }
   }
   function buzz(p) { try { if (navigator.vibrate && vibOn()) navigator.vibrate(p); } catch (e) {} }   // Settings: สั่นเมื่อสแกนติด (default on; the setting row is hidden where vibrate does not exist)
-  function toast(msg, ms) {
-    var t = $('toast'); t.textContent = msg; t.hidden = false;
-    clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, ms || 1800);
+  function toast(msg, ms, kind) {   // kind: 'ok' (green tick from CSS) / 'bad' (red); the time follows the length of the text unless a caller names one
+    var t = $('toast'); t.textContent = msg; t.className = 'toast' + (kind ? ' ' + kind : ''); t.hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, ms || Math.min(6000, Math.max(2200, 1200 + 70 * String(msg).length)));
+  }
+  /** a short pulse on an element (Web Animations): only where animate exists and the person has not asked for less motion */
+  function pulse(id, frames, ms) {
+    try {
+      var n = $(id); if (!n || typeof n.animate !== 'function') return;
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      n.animate(frames, { duration: ms, easing: 'ease-out' });
+    } catch (e) { /* no animation: fine */ }
   }
 
   /* ---------------- network ---------------- */
@@ -1048,6 +1058,14 @@ if (typeof document !== 'undefined') (function () {
       k.appendChild(b);
     });
   }
+  /** the one place that writes the pad line: a "กำลัง…" text is a wait (grey, spinner, dimmed keys), anything else is an error / hint */
+  function padSay(text) {
+    text = text || '';
+    var w = /^กำลัง/.test(text), m = $('padMsg'), k = $('keys');
+    m.textContent = text;
+    try { if (m.classList) m.classList.toggle('wait', w); if (k && k.classList) k.classList.toggle('wait', w); } catch (e) { /* plain text only */ }
+  }
+  function shakeDots() { try { var d = $('dots'); if (!d || !d.classList) return; d.classList.add('shake'); setTimeout(function () { d.classList.remove('shake'); }, 400); } catch (e) {} }
   function drawDots() { var d = $('dots').children; for (var i = 0; i < d.length; i++) d[i].className = i < padBuf.length ? 'on' : ''; }
   function lockKeys(on) { var b = $('keys').querySelectorAll('button'); for (var i = 0; i < b.length; i++) if (b[i].textContent !== '') b[i].disabled = on; }
   /** Shows the pad (wrong PIN / lock / first open). The queue and the lists stay in memory: nothing is lost. */
@@ -1067,9 +1085,11 @@ if (typeof document !== 'undefined') (function () {
     $('padLinkHint').hidden = !linkFromStore;   // a saved (old) link may be dead: tell the person where to look, nothing else changes
     if (!$('scan').hidden) closeScan();   // closeScan also syncs the back-history entry; any open card is kept as it was
     closeSettings();
-    $('padMsg').textContent = msg || ''; lockKeys(!!locked);
+    padSay(msg || ''); lockKeys(!!locked);
+    if (msg && !set) { buzz([60, 60, 60]); shakeDots(); }   // a refused / locked / changed code: felt and seen, not only read
+    drawVerify();
     clearTimeout(syncTimer); clearTimeout(lockTimer);
-    if (locked) lockTimer = setTimeout(function () { padLocked = false; lockKeys(false); $('padMsg').textContent = ''; bioDraw(); }, 15 * 60 * 1000 + 3000);
+    if (locked) lockTimer = setTimeout(function () { padLocked = false; lockKeys(false); padSay(''); bioDraw(); }, 15 * 60 * 1000 + 3000);
     bioDraw(); bioDrawFoot();
   }
   function padPress(d) {
@@ -1084,24 +1104,24 @@ if (typeof document !== 'undefined') (function () {
   function feedPin(pin, fromBio) {
     bioSourced = !!fromBio; typedByHand = !fromBio;
     if (fromBio) { padBuf = pin; drawDots(); }
-    if (probing) { pendingPin = pin; $('padMsg').textContent = 'กำลังตรวจรหัส…'; padBusy = true; return; }   // the "does this link need a PIN" probe is still out
+    if (probing) { pendingPin = pin; padSay('กำลังตรวจรหัส…'); padBusy = true; return; }   // the "does this link need a PIN" probe is still out
     submitPin(pin);
   }
   /** Four digits typed while choosing a code: remember them, ask again; if the two differ start over; if they match save them and go straight in. */
   function setPress(typed) {
     if (setMode === 'enter') {
-      firstPin = typed; setMode = 'confirm'; padBuf = ''; drawDots(); drawSetMode(); $('padMsg').textContent = ''; return;
+      firstPin = typed; setMode = 'confirm'; padBuf = ''; drawDots(); drawSetMode(); padSay(''); return;
     }
     if (typed !== firstPin) {
-      firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); $('padMsg').textContent = 'รหัสไม่ตรงกัน ลองใหม่'; return;
+      firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); padSay('รหัสไม่ตรงกัน ลองใหม่'); return;
     }
-    padBusy = true; PIN = typed; bioSourced = false; typedByHand = true; $('padMsg').textContent = 'กำลังบันทึกรหัส…';
+    padBusy = true; PIN = typed; bioSourced = false; typedByHand = true; padSay('กำลังบันทึกรหัส…');
     api('setpin', {}, function (res) {
       if (res && res.ok === true) { setMode = ''; firstPin = ''; drawSetMode(); padBuf = ''; drawDots(); submitPin(typed); return; }   // saved: boot as logged in with it
       if (res && res.code === 'PIN') { PIN = null; showPad('รหัสถูกตั้งไว้แล้ว ใส่รหัสที่ตั้งไว้', false); return; }   // a code was already set (another phone, or an earlier try): the ordinary pad; NO boot with the code just typed (a wrong try on the server)
-      if (res && (res.code === 'BAD' || res.code === 'SETPIN')) { PIN = null; firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); padBusy = false; $('padMsg').textContent = res.error || 'บันทึกรหัสไม่สำเร็จ ลองใหม่'; return; }   // a plain no: choose again
+      if (res && (res.code === 'BAD' || res.code === 'SETPIN')) { PIN = null; firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); padBusy = false; padSay(res.error || 'บันทึกรหัสไม่สำเร็จ ลองใหม่'); return; }   // a plain no: choose again
       // the reply was lost (network / timeout / busy) or says PIN needed (the save may have landed, or another phone set one): try to go in with the code just typed first
-      setMode = ''; firstPin = ''; drawSetMode(); $('padMsg').textContent = 'กำลังตรวจรหัส…';
+      setMode = ''; firstPin = ''; drawSetMode(); padSay('กำลังตรวจรหัส…');
       api('boot', {}, function (r) {
         var c = L.classify(r);
         if (c === 'ok') { padBusy = false; padBuf = ''; drawDots(); acceptBoot(r, false); return; }
@@ -1113,7 +1133,7 @@ if (typeof document !== 'undefined') (function () {
     });
   }
   function submitPin(typed) {
-    padBusy = true; PIN = typed; $('padMsg').textContent = 'กำลังตรวจรหัส…';
+    padBusy = true; PIN = typed; padSay('กำลังตรวจรหัส…');
     if (cached() && !M && !D) { showCachedUnverified(); }   // the last list shows at once; it is only usable once the server accepts the PIN
     api('boot', {}, function (res) { padBusy = false; onBoot(res, true); });
   }
@@ -1178,7 +1198,7 @@ if (typeof document !== 'undefined') (function () {
     var rec = bioRec, idb = L.b64uDec(rec.id), saltb = L.b64uDec(rec.salt), ivb = L.b64uDec(rec.iv), ctb = L.b64uDec(rec.ct), t0 = Date.now(), step = 'scan', ctl = null;
     bioCancel(); var gen = bioGen;
     try { if (typeof AbortController !== 'undefined') ctl = new AbortController(); } catch (e) { ctl = null; }
-    bioCtl = ctl; bioState = 'scan'; $('padMsg').textContent = ''; bioDraw();
+    bioCtl = ctl; bioState = 'scan'; padSay(''); bioDraw();
     var chain;
     try {
       chain = bioGetPrf(idb, saltb, ctl ? ctl.signal : null).then(function (prf) {
@@ -1201,13 +1221,13 @@ if (typeof document !== 'undefined') (function () {
       bioCtl = null;
       var name = err && err.name;
       if (step === 'open' || (err && err.unusable)) {   // the saved code cannot be decrypted (scan data reset on the phone): useless, delete it
-        bioDelete(); bioState = 'idle'; $('padMsg').textContent = 'ใช้การสแกนไม่ได้ ใส่รหัส PIN'; bioDraw(); return;
+        bioDelete(); bioState = 'idle'; padSay('ใช้การสแกนไม่ได้ ใส่รหัส PIN'); bioDraw(); return;
       }
       if (!retried && !auto && (name === 'InvalidStateError' || /pending/i.test(String(err && err.message)))) {   // the aborted earlier prompt is still closing: once more shortly
         setTimeout(function () { if (gen === bioGen) { bioState = 'idle'; bioScan(auto, true); } }, 300); return;
       }
       if (auto && name === 'NotAllowedError' && Date.now() - t0 < 800) { bioState = 'tap'; bioDraw(); return; }   // iOS refuses a scan without a tap: ask for one
-      bioState = 'idle'; $('padMsg').textContent = 'สแกนไม่สำเร็จ ใส่รหัส PIN หรือสแกนอีกครั้ง'; bioDraw();
+      bioState = 'idle'; padSay('สแกนไม่สำเร็จ ใส่รหัส PIN หรือสแกนอีกครั้ง'); bioDraw();
     });
   }
   /** the offer sheet: mode 'ask' (the question) or 'confirm' (iOS: the phone gave no secret on create, one more tap runs the scan) */
@@ -1229,7 +1249,7 @@ if (typeof document !== 'undefined') (function () {
     if (raw && !bioRec) store.del(KBIO);   // a damaged record is just dropped
     $('bioTap').addEventListener('click', function () { bioScan(false); });
     $('bioAgain').addEventListener('click', function () { if (padBusy) return; bioScan(false); });
-    $('bioPinLink').addEventListener('click', function () { bioCancel(); $('padMsg').textContent = ''; bioDraw(); });
+    $('bioPinLink').addEventListener('click', function () { bioCancel(); padSay(''); bioDraw(); });
     $('bioToggle').addEventListener('click', function () {
       if (bioRec) { bioDelete(); store.set(KBION, '1'); toast('ปิดการสแกนแล้ว'); bioDrawFoot(); return; }
       bioEnable(function (ok) { if (ok) toast('เปิดใช้ ' + L.bioLabel(navigator.userAgent) + ' แล้ว'); bioDrawFoot(); });
@@ -1321,7 +1341,20 @@ if (typeof document !== 'undefined') (function () {
   /* ---------------- boot / sync ---------------- */
   function showCachedUnverified() {
     try { acceptBoot(cached(), true); } catch (e) { /* a damaged cache is just ignored */ M = null; D = null; }
+    drawVerify();
   }
+  /** the small floating "กำลังตรวจรหัส…" pill + the dimmed (read-only) lists while the server has not accepted the PIN yet, or while another place's list is loading */
+  function drawVerify() {
+    try {
+      var ch = $('vchip'), app = $('app'); if (!ch || !app) return;
+      var up = !app.hidden, wait = up && PIN !== null && !verified && !offline, swi = up && switching(), swiWait = swi && rebootFails === 0;
+      ch.hidden = !(wait || swiWait);
+      if (!ch.hidden) { var tx = $('vchipTx'); if (tx) tx.textContent = swiWait && !wait ? switchMsg() : 'กำลังตรวจรหัส…'; }
+      if (app.classList) app.classList.toggle('ro', !verified || swi);
+    } catch (e) { /* the pill is only a help */ }
+  }
+  /** the "not yet" toast: with no signal nothing is being checked, so it must not say so */
+  function waitMsg() { return offline ? 'รอสักครู่ ยังไม่มีสัญญาณ' : 'รอสักครู่ กำลังตรวจรหัส'; }
   function onBoot(res, fromPad) {
     var c = L.classify(res);
     if (c === 'ok') { PIN = PIN === null || PIN === undefined ? null : PIN; acceptBoot(res, false); if (switching()) reboot(); return; }   // (a place switch that the pad interrupted goes on)
@@ -1335,18 +1368,18 @@ if (typeof document !== 'undefined') (function () {
     // With a kept list the person can look at it (read-only: no card, no save, no queue send) until the server has accepted a PIN in this page load.
     if (fromPad && cached() && c === 'retry') { goOffline(res && res.error || NET.error); return; }
     if (fromPad && cached()) { showPad(res && res.error || NET.error, false); return; }   // a refusal (BAD etc.) is not "no signal": back to the pad with the reason, no offline polling
-    if (fromPad) { $('padMsg').textContent = res.error || NET.error; PIN = null; padBuf = ''; drawDots(); padBusy = false; return; }
+    if (fromPad) { padSay(res.error || NET.error); PIN = null; padBuf = ''; drawDots(); padBusy = false; return; }
   }
   function goOffline(why) {
     verified = false; offline = true; bioDrawFoot();
     try { acceptBoot(cached(), true); } catch (e) { M = null; D = null; }
-    $('pad').hidden = true; $('app').hidden = false; render(); drawInstall();
+    $('pad').hidden = true; $('app').hidden = false; render(); drawInstall(); drawVerify();
     clearTimeout(offTimer); offTimer = setTimeout(retryOnline, 15000);
   }
-  function retryOnline() {
+  function retryOnline(manual) {   // manual === true: the person pressed ลองเชื่อมต่อใหม่ (the timer and the click event never count)
     clearTimeout(offTimer);
-    if (!offline || PIN === null) return;
-    api('boot', {}, function (res) { var c = L.classify(res); if (c === 'ok') acceptBoot(res, false); else if (c === 'pin') showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN'); else if (c === 'retry') offTimer = setTimeout(retryOnline, 15000); else showPad(res && res.error || NET.error, false); });   // (a refusal does not poll forever)
+    if (!offline || PIN === null) { if (manual === true) renderNotes(); return; }
+    api('boot', {}, function (res) { var c = L.classify(res); if (c === 'ok') acceptBoot(res, false); else if (c === 'pin') showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN'); else if (c === 'retry') { offTimer = setTimeout(retryOnline, 15000); if (manual === true) { renderNotes(); toast('ยังไม่มีสัญญาณ จะลองใหม่เองทุก 15 วินาที', 3500); } } else showPad(res && res.error || NET.error, false); });   // (a refusal does not poll forever)
   }
   function probe() {
     probing = true;
@@ -1393,17 +1426,20 @@ if (typeof document !== 'undefined') (function () {
     if (card && !card.unknown && card.mode === 'scan' && !card.camMsg && !$('card').hidden) drawCard();   // the PIN pad stopped the piece camera: bring it back with the card
     if (!unverified) { if (!udDone) udRestore(); if (!fdDone) fdRestore(); if (!ddTried) ddRestore(); }   // (the card drafts are asked again at every accepted list until they are used or thrown away: a roaming person's first list may be another place's)
     if (!unverified) { bioCancel(); bioStale = false; bioDrawFoot(); bioMaybeOffer(); }
+    drawVerify();
     if (!unverified) { schedSync(); pump(); if (!geoStarted) { geoStarted = true; geoCheck(); } else geoFlush(); }
   }
-  var redrawLater = false, saveListTimer = null, listToSave = null;
+  var redrawLater = false, saveListTimer = null, saveListIdle = false, listToSave = null;
   /** the list kept for the next start is written a moment later, not while the screen is being drawn (the text of a big list is built and stored in one go: slow on a cheap phone) */
   function saveListLater(res) {
     listToSave = res; if (saveListTimer) return;
-    saveListTimer = setTimeout(function () { flushList(true); }, 0);
+    var run = function () { flushList(true); };
+    try { if (typeof window.requestIdleCallback === 'function') { saveListTimer = window.requestIdleCallback(run, { timeout: 2000 }); saveListIdle = true; return; } } catch (e) { saveListTimer = null; }   // idle time when the browser has it (at the latest after 2 s), else a plain timer
+    saveListIdle = false; saveListTimer = setTimeout(run, 0);
   }
   /** write the waiting list now (also when the page is being hidden or closed: a timer may never fire then). A failed write marks the storage as unusable, so the Face ID offer, which waits for this, is asked again afterwards. */
   function flushList(offer) {
-    var r = listToSave; clearTimeout(saveListTimer); saveListTimer = null; listToSave = null;
+    var r = listToSave; if (saveListIdle && typeof window.cancelIdleCallback === 'function') { try { window.cancelIdleCallback(saveListTimer); } catch (e) {} } else clearTimeout(saveListTimer); saveListTimer = null; saveListIdle = false; listToSave = null;
     if (!r || !KL) return;
     if (store.set(KL, JSON.stringify(r))) listNoStore = false;
     else { store.del(KL); listNoStore = true; }   // a failed write must not leave the OLD list behind (it would show later as the current one); only the Face ID guard learns about it - the queue is another key and still works (noStore stays as persistQ left it)
@@ -1451,13 +1487,13 @@ if (typeof document !== 'undefined') (function () {
   function geoFlush() { if (geoWait && geoIdle()) { geoWait = false; geoCheck(); } }
   /** The same as choosing the place in the dropdown (auto = GPS did it: say so). */
   function switchLoc(name, auto) {
-    pickLoc = name; rebootFails = 0; ST.tab = 'first'; ST.shelf = '';
+    pickLoc = name; rebootFails = 0; ST.tab = 'first'; ST.shelf = ''; listMax = 150;
     if (!auto) { geoLock = { at: null }; geoCheck(); }   // (a fresh reading marks where the hand pick happened)
     if (card) backHome();
     try { $('locPick').value = name; } catch (e) {}
     var hit = locCache[name];
     if (hit && verified && Date.now() - hit.at < 600000) { try { acceptBoot(hit.res, true); } catch (e) { /* the fresh list follows anyway */ } }   // (remembered list: shown at once; the fresh one replaces it in a moment)
-    $('sub').textContent = subText();
+    $('sub').textContent = subText(); drawVerify();
     reboot();
     if (auto) toast('ตอนนี้อยู่ที่ ' + name + ' — เปลี่ยนให้แล้ว', 4000);
   }
@@ -1488,8 +1524,8 @@ if (typeof document !== 'undefined') (function () {
       if (c === 'ok' && ack !== ackSeq && drops < 3) { rebootTimer = setTimeout(function () { reboot(n, drops + 1); }, 1500); return; }   // a save was confirmed meanwhile: ask again (at most 3 times)
       if (c === 'ok') { rebootFails = 0; acceptBoot(res, false); }
       else if (c === 'pin') showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN');
-      else if (c === 'retry') { if (switching()) { rebootFails = n + 1; try { $('sub').textContent = subText(); } catch (e) {} } if (switching()) rebootTimer = setTimeout(function () { reboot(n + 1); }, Math.min(30000, 2000 * Math.pow(2, n))); }
-      else if (switching()) { pickLoc = M.loc; try { $('locPick').value = M.loc; } catch (e) {} $('sub').textContent = subText(); }   // refused: stay on the list we have, unblocked
+      else if (c === 'retry') { if (switching()) { rebootFails = n + 1; try { $('sub').textContent = subText(); } catch (e) {} drawVerify(); } if (switching()) rebootTimer = setTimeout(function () { reboot(n + 1); }, Math.min(30000, 2000 * Math.pow(2, n))); }
+      else if (switching()) { pickLoc = M.loc; try { $('locPick').value = M.loc; } catch (e) {} $('sub').textContent = subText(); drawVerify(); }   // refused: stay on the list we have, unblocked
     });
   }
 
@@ -1518,8 +1554,8 @@ if (typeof document !== 'undefined') (function () {
       }
       if (c === 'ok') syncDrops = 0;
       if (c === 'ok') {
-        if (res.same) { loadedAt = Date.now(); if (manual && !quiet) toast('อัปเดตแล้ว'); }
-        else if (!card) { if (D && editingDaily()) { acceptBoot(res, false, true); } else acceptBoot(res, false); if (manual && !quiet) toast('อัปเดตแล้ว'); }   // a half-typed daily card: take the data, draw it later
+        if (res.same) { loadedAt = Date.now(); if (manual && !quiet) toast('อัปเดตแล้ว', undefined, 'ok'); }
+        else if (!card) { var anc = listAnchor(); if (D && editingDaily()) { acceptBoot(res, false, true); } else acceptBoot(res, false); listRestore(anc); if (manual && !quiet) toast('อัปเดตแล้ว', undefined, 'ok'); }   // a half-typed daily card: take the data, draw it later
       }
       else if (c === 'pin') { showPad(res.error, res.code === 'LOCK', res.code === 'SETPIN'); return; }
       else if (manual && !quiet) toast(res.error || NET.error);
@@ -1682,7 +1718,7 @@ if (typeof document !== 'undefined') (function () {
   function keepOldLink() {
     try { history.replaceState(null, '', location.href.split('#')[0] + '#x=' + T.x + '&t=' + T.t); } catch (e) {}
     toast('ส่งงานของลิงก์เดิมก่อน', 4000);
-    try { if (!$('pad').hidden) $('padMsg').textContent = OLD_LINK_MSG; } catch (e) { /* the toast said it */ }   // a lasting line on the pad, not only the toast
+    try { if (!$('pad').hidden) padSay(OLD_LINK_MSG); } catch (e) { /* the toast said it */ }   // a lasting line on the pad, not only the toast
   }
   var OLD_LINK_MSG = 'ลิงก์เดิมยังมีงานรอส่ง ให้เจ้าของลิงก์เดิมใส่รหัส';
   /** The wait for another link's open: ends when the queue is empty; with a DURABLE queue (safe in sc5.q.<token>) also after 10 s, at once without signal, or when sends keep failing; a memory-only queue is waited for as long as it takes. */
@@ -1747,6 +1783,7 @@ if (typeof document !== 'undefined') (function () {
     }
     render();
     if (resync) resyncSoon();
+    toast('บันทึกไม่สำเร็จ 1 รายการ ดูข้อความสีแดงด้านบน', 6000, 'bad'); buzz([120, 80, 120]);   // the red note sits at the top of the home page: the person is often elsewhere
   }
   /** several refused full-count entries in a row (a lock, a day change) ask for ONE list refresh, a moment later, not one per entry */
   var resyncPending = false;
@@ -1780,7 +1817,7 @@ if (typeof document !== 'undefined') (function () {
   function renderNotes() {
     var box = $('notes'); clear(box);
     if (offline) {
-      var again = btn('tbtn', 'ลองเชื่อมต่อใหม่'); again.addEventListener('click', retryOnline);
+      var again = btn('tbtn', 'ลองเชื่อมต่อใหม่'); again.addEventListener('click', function () { again.disabled = true; again.textContent = 'กำลังเชื่อมต่อ…'; retryOnline(true); });
       box.appendChild(noteBox('banner', 'wifi-off', 'ออฟไลน์ ดูรายการได้อย่างเดียว ยังบันทึกไม่ได้ จนกว่าจะเชื่อมต่อและระบบตรวจรหัสผ่าน', again));
     }
     if (Q.length && L.qFailing(Q)) box.appendChild(noteBox('refused', 'triangle-alert', 'ส่งไม่สำเร็จ ระบบจะลองส่งซ้ำเอง กรุณาเปิดหน้านี้ค้างไว้จนกว่าจะส่งครบ' + (noStore || memOnlyPhotos() ? ' (เครื่องนี้เก็บคิวไม่ได้ ถ้าปิดหน้านี้รายการจะหาย)' : '')));
@@ -1806,7 +1843,9 @@ if (typeof document !== 'undefined') (function () {
   function renderLocBar() {
     var bar = $('locBar'), src = M || D || {}, choices = L.locChoices(src.locs, src.loc), sel = $('locPick');
     if (!choices.length) { bar.hidden = true; return; }
-    bar.hidden = false; clear(sel);
+    bar.hidden = false;
+    if (document.activeElement === sel) return;   // the picker is open: a refresh must not destroy its options
+    clear(sel);
     choices.forEach(function (n) { var o = el('option', '', n); o.value = n; if (n === (switching() ? pickLoc : src.loc)) o.selected = true; sel.appendChild(o); });
   }
 
@@ -1887,11 +1926,39 @@ if (typeof document !== 'undefined') (function () {
     t.setAttribute('aria-selected', ST.tab === 'second' ? 'true' : 'false');
   }
   function renderChips() {
-    var sel = $('shelfSel'), shelves = L.shelvesOf(M, curList()); clear(sel);
+    var sel = $('shelfSel'), shelves = L.shelvesOf(M, curList());
+    if (document.activeElement === sel) return;   // the picker is open: keep its options
+    clear(sel);
     var o = el('option', '', 'ทุกชั้น'); o.value = ''; sel.appendChild(o);
     shelves.forEach(function (s) { var x = el('option', '', s); x.value = s; sel.appendChild(x); });
     sel.value = shelves.indexOf(ST.shelf) >= 0 ? ST.shelf : ''; if (sel.value !== ST.shelf) ST.shelf = '';
   }
+  /** the first rows (up to 5) whose top is on screen, with where they are: taken before a background refresh replaces the list */
+  function listAnchor() {
+    try {
+      if (card || !M || settingsOpen || $('home').hidden || $('vwrap').hidden) return null;
+      var rows = $('list').querySelectorAll('.prow'), out = [], i, t;
+      for (i = 0; i < rows.length && out.length < 5; i++) {
+        if (typeof rows[i].getBoundingClientRect !== 'function') return null;
+        t = rows[i].getBoundingClientRect().top;
+        if (t >= 0 && rows[i].getAttribute('data-k')) out.push({ k: rows[i].getAttribute('data-k'), top: t });
+      }
+      return out.length ? out : null;
+    } catch (e) { return null; }
+  }
+  /** after the refresh: the first remembered row that still exists is put back where it was (the page scrolls by the difference; nothing else changes) */
+  function listRestore(a) {
+    try {
+      if (!a || card || !M || typeof window.scrollBy !== 'function') return;
+      var rows = $('list').querySelectorAll('.prow'), map = {}, i, k, r;
+      for (i = 0; i < rows.length; i++) { k = rows[i].getAttribute('data-k'); if (k && !(k in map)) map[k] = rows[i]; }
+      for (i = 0; i < a.length; i++) {
+        r = map[a[i].k];
+        if (r && typeof r.getBoundingClientRect === 'function') { var d = r.getBoundingClientRect().top - a[i].top; if (Math.abs(d) >= 1) window.scrollBy(0, d); return; }
+      }
+    } catch (e) { /* the list simply stays where the browser put it */ }
+  }
+  var listMax = 150;   // rows shown at most; the button under the list raises it by 150, any change of tab / shelf / search / place sets it back
   function renderList() {
     if (!M || M.state !== 'open') return;
     var box = $('list'); clear(box); renderTabs();
@@ -1904,7 +1971,7 @@ if (typeof document !== 'undefined') (function () {
       box.appendChild(el('div', 'caption', 'ต้องนับซ้ำ: นับให้ตรงตามที่เห็นจริง (เรียงตามความสำคัญ)'));
     }
     // counted rows stay hidden in the plain "not counted yet" view, but show as green rows at the bottom of their shelf once the person searches, picks a shelf or ticks "show counted"
-    var f = L.filterItems(M, src, { q: ST.q, shelf: ST.shelf, showDone: ST.showDone || (forced && !second), doneLast: !second, max: 150 });
+    var f = L.filterItems(M, src, { q: ST.q, shelf: ST.shelf, showDone: ST.showDone || (forced && !second), doneLast: !second, max: listMax });
     if (!second) {
       $('uncLbl').textContent = ST.showDone ? 'ทุกรายการ' : 'ยังไม่ได้นับ';
       $('uncCnt').textContent = fmt((forced && !ST.showDone) ? f.un : f.rows.length + f.hidden);   // a search shows counted rows too (f), but the number is still the matches that are not counted yet
@@ -1918,10 +1985,12 @@ if (typeof document !== 'undefined') (function () {
     f.rows.forEach(function (it) { grp.appendChild(rowOf(it)); });
     if (f.rows.length) box.appendChild(grp);
     if (f.hidden) box.appendChild(el('div', 'empty', 'ยังมีอีก ' + fmt(f.hidden) + ' รายการ - พิมพ์ค้นหาหรือเลือกชั้นวางให้แคบลง'));
+    if (f.hidden) { var more = btn('tbtn c', 'แสดงอีก 150'); more.addEventListener('click', function () { listMax += 150; renderList(); }); box.appendChild(more); }
     if (!f.rows.length) box.appendChild(el('div', second ? 'msg ok' : 'empty', (ST.q.trim() || ST.shelf) ? 'ไม่มีรายการที่ตรงกับตัวกรอง' : (second ? 'ตอนนี้ไม่มีรายการให้คุณนับซ้ำ' : 'ไม่เหลือรายการที่ยังไม่ได้นับ')));
   }
   function rowOf(it) {
     var part = M.parts[it.p], second = ST.tab === 'second', b = btn('prow lrow' + (it.done ? ' done' : '') + (it.done && !second ? ' counted' : ''));
+    b.setAttribute('data-k', (part.id || part.code2) + '|' + it.shelf);   // lets a refresh put the same row back under the finger (listAnchor / listRestore)
     var two = el('div', 'two'); two.appendChild(el('div', 'l1', part.name));
     var l2 = el('div', 'l2'); l2.appendChild(el('span', 'pn', part.code2));
     var sh = el('span', 'shelfchip'); sh.appendChild(ic('map-pin')); sh.appendChild(el('span', '', it.shelf)); l2.appendChild(sh);
@@ -1933,10 +2002,12 @@ if (typeof document !== 'undefined') (function () {
     else if (it.done) { var ck = ic('circle-check', 'chk'); ck.setAttribute('aria-hidden', 'false'); ck.setAttribute('role', 'img'); ck.setAttribute('aria-label', 'นับแล้ว'); b.appendChild(ck); }
     b.appendChild(ic('chevron-right', 'chev'));
     b.addEventListener('click', function () {
-      if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
+      if (!verified) { toast(waitMsg()); return; }
       var oc = ST.tab === 'second' ? L.cardOfSecondRow(M, it.p) : L.cardOf(M, it.p, true);
       if (ST.tab !== 'second') oc.ff = true;   // opened by a tap on a first-list row (kept in the draft: see fdRestore)
+      var y = window.scrollY || window.pageYOffset || 0;
       openCard(oc, it.shelf, false);
+      if (card === oc) homeY = y;   // only a card opened from a list row remembers where the list was (a scan / typed code goes back to the top)
     });
     return b;
   }
@@ -1995,6 +2066,7 @@ if (typeof document !== 'undefined') (function () {
     udClear(); fdClear(); showCard(); focusQty();
   }
   /** the card opens in type mode: put the cursor in the quantity box (iOS may refuse to open the keyboard - harmless) */
+  function vfIntoView() { try { var v = $('pieceVf'); if (v && !v.hidden && typeof v.scrollIntoView === 'function') v.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
   function focusQty() { try { var q = $('qtyIn'); if (q && card && card.mode === 'type') q.focus(); } catch (e) {} }
   var KUD = T ? 'sc5.ud.' + T.t : '', udDone = false, fdDone = false;
   /** A small draft of the unknown-code card (code, quantity, shelf) in the tab session store (KUD): an Android tab reload while the camera app is open must not lose what was typed. */
@@ -2019,6 +2091,7 @@ if (typeof document !== 'undefined') (function () {
   /* ---- drafts of the open full-count card (KFD) and the daily cards (KDD) in the tab session store, like the unknown-code draft above ----
    * An Android tab can be killed while the camera app is open: what was typed / scanned comes back after the PIN. Only typed or scanned values are kept (part id, shelf, quantity, place, date), NEVER a photo. Every access is in try/catch. */
   var KFD = T ? 'sc5.fd.' + T.t : '', KDD = T ? 'sc5.dd.' + T.t : '', ddTried = false;
+  function fieldAttrs(node, o) { try { Object.keys(o).forEach(function (k) { node.setAttribute(k, o[k]); }); } catch (e) {} }   // keyboard hints (enterkeyhint / autocorrect ...) set with setAttribute
   function str(v) { return v === null || v === undefined ? '' : String(v); }
   function ssRead(k) { try { return k ? JSON.parse(sessionStorage.getItem(k) || 'null') : null; } catch (e) { return null; } }
   function ssWrite(k, v) { try { if (k) sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
@@ -2081,8 +2154,10 @@ if (typeof document !== 'undefined') (function () {
     if (any && !card && !busy) renderDaily(); else if (any) redrawLater = true;   // (a half-typed card / an open card: drawn later, the values are already in the drafts)
     ddSave();
   }
-  function showCard() { hideSug(); closeScan(); closeSettings(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); syncLayer(); drawInstall(); }
-  function backHome() { camStop(); card = null; udClear(); fdClear(); $('card').hidden = true; $('home').hidden = false; if (M) { renderProg(); renderChips(); renderList(); } else if (D) renderDaily(); renderNotes(); syncLayer(); geoFlush(); drawInstall(); }
+  var homeY = null;   // scroll position of the list when a row was tapped; backHome puts it back
+  function cardClass(on) { try { var b = document.body; if (b && b.classList) b.classList.toggle('card-open', !!on); } catch (e) {} }
+  function showCard() { homeY = null; cardClass(true); hideSug(); closeScan(); closeSettings(); $('home').hidden = true; $('card').hidden = false; drawCard(); window.scrollTo(0, 0); if (card && !card.unknown && card.mode === 'scan') vfIntoView(); syncLayer(); drawInstall(); }
+  function backHome() { camStop(); card = null; udClear(); fdClear(); cardClass(false); $('card').hidden = true; $('home').hidden = false; if (M) { renderProg(); renderChips(); renderList(); } else if (D) renderDaily(); renderNotes(); syncLayer(); geoFlush(); drawInstall(); if (homeY !== null) { var y2 = homeY; homeY = null; try { window.scrollTo(0, y2); } catch (e) {} } }
   /* Android back button: while the card or scan sheet is open, one history entry (same URL) sits on top so "back" closes that layer instead of leaving the app; closing by hand removes it again (the swallow flag ignores the popstate that causes). */
   var layerPushed = false, layerSwallow = false, settingsOpen = false;
   function layerOpen() { return !!card || !$('scan').hidden || settingsOpen; }
@@ -2118,7 +2193,7 @@ if (typeof document !== 'undefined') (function () {
   }
 
   function drawCard() {
-    camStop();
+    camStop(); qtyEl = null; zeroArm = false; clearTimeout(zeroTimer);
     var box = $('card'); clear(box);
     var nav = el('div', 'nav'), back = btn('navback');
     back.appendChild(ic('chevron-left')); back.appendChild(el('span', '', card.leave ? 'ยังไม่ได้บันทึก กดอีกครั้งเพื่อกลับ' : 'กลับ'));
@@ -2135,20 +2210,22 @@ if (typeof document !== 'undefined') (function () {
     ht.appendChild(el('div', 'pcode', card.code2)); ht.appendChild(el('h2', 'pname', card.name)); head.appendChild(ht);
     box.appendChild(head);
 
-    var grp = null;
+    var grp = null, srow = null;
     if (card.ext) box.appendChild(noteBox('note', 'info', 'อะไหล่จากสาขาอื่น/สำนักงานใหญ่ นับที่นี่ได้ตามปกติ'));
     if (!card.ext && !card.second) { var cnt = countedNote(); if (cnt) box.appendChild(cnt); }   // 2+ counted shelves of this part: who counted which (never a quantity)
     if (card.shelf !== null && card.shelf !== '') {
-      grp = el('div', 'group'); var srow = el('div', 'item');
+      grp = el('div', 'group'); srow = el('div', 'item');
       srow.appendChild(ic('map-pin')); srow.appendChild(el('span', 'grow', 'ชั้น ' + card.shelf)); grp.appendChild(srow);
     }
     if (card.shelf === null) { drawShelfPicker(box); return; }
 
     if (!(card.ext && !needShelf())) {
       if (!grp) grp = el('div', 'group');
-      var chg = btn('item act'); chg.appendChild(el('span', 'grow', 'เปลี่ยนชั้นวาง'));
+      var chg = btn(srow ? 'tbtn' : 'item act');   // one row: icon, "ชั้น X" and the change button at its right end (saves a row of height)
+      if (srow) chg.textContent = 'เปลี่ยนชั้นวาง'; else chg.appendChild(el('span', 'grow', 'เปลี่ยนชั้นวาง'));
       chg.addEventListener('click', function () { card.shelf = null; card.other = false; card.qty = 0; card.lock = ''; card.warn = ''; drawCard(); });
-      grp.appendChild(chg); box.appendChild(grp);
+      if (srow) srow.appendChild(chg); else grp.appendChild(chg);
+      box.appendChild(grp);
     }
     var info = card.ext ? (card.extDone ? { done: true, doneOn: card.extDone.doneOn, doneBy: card.extDone.doneBy } : null) : shelfInfo(card.shelf);
     if (info && info.done) box.appendChild(noteBox('note', 'info', 'นับแล้ว ' + info.doneOn + ' โดย ' + info.doneBy + ' — นับใหม่จะแทนที่ค่าเดิม'));
@@ -2157,7 +2234,7 @@ if (typeof document !== 'undefined') (function () {
     [['type', 'พิมพ์จำนวน'], ['scan', 'สแกนทีละชิ้น']].forEach(function (m) {
       var b = btn('segb'); b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', card.mode === m[0] ? 'true' : 'false');
       b.appendChild(ic('check', 'segck')); b.appendChild(el('span', 'lb', m[1]));
-      b.addEventListener('click', function () { if (m[0] === 'scan' && card.mode !== 'scan') { card.qty = 0; card.lock = ''; } card.mode = m[0]; card.warn = ''; card.err = ''; card.camMsg = ''; card.leave = false; drawCard(); });
+      b.addEventListener('click', function () { if (m[0] === 'scan' && card.mode !== 'scan') { card.qty = 0; card.lock = ''; } card.mode = m[0]; card.warn = ''; card.err = ''; card.camMsg = ''; card.leave = false; drawCard(); focusQty(); if (m[0] === 'scan') vfIntoView(); });
       tabs.appendChild(b);
     });
     box.appendChild(tabs);
@@ -2166,17 +2243,40 @@ if (typeof document !== 'undefined') (function () {
     if (card.mode === 'scan') drawScanMode(pn); else drawTypeMode(pn);
     box.appendChild(pn);
 
-    var err = el('div', card.err ? 'msg err' : ''); err.id = 'cardErr'; err.textContent = card.err || ''; box.appendChild(err);
+    var err = el('div', card.err ? 'msg err' : ''); err.id = 'cardErr'; err.textContent = card.err || '';
     var save = btn('pbtn', 'บันทึก'); save.id = 'saveBtn';
-    save.addEventListener('click', function () {
-      if (card.mode === 'scan' && !(Number(card.qty) > 0)) { card.err = 'ยังไม่ได้สแกน ถ้าไม่พบเลยให้กด ไม่พบเลย (0)'; drawCard(); return; }   // scan mode with nothing scanned is never a count of 0: only the explicit ไม่พบเลย (0) button saves 0
+    var onSave = function () {
+      if (card.mode === 'scan' && !(Number(card.qty) > 0)) { card.err = 'ยังไม่ได้สแกน ถ้าไม่พบเลยให้กด ไม่พบเลย (0)'; cardFail(card.err); return; }   // scan mode with nothing scanned is never a count of 0: only the explicit ไม่พบเลย (0) button saves 0
       doSave(readQty());
-    }); box.appendChild(save);
-    var zero = btn('tbtn c', 'ไม่พบเลย (0)');
-    zero.addEventListener('click', function () { doSave(0); }); box.appendChild(zero);
+    };
+    save.addEventListener('click', onSave);
+    if (qtyEl) qtyEl.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); onSave(); } });   // Enter in the quantity box = Save
+    var bar = el('div', 'savebar'); bar.appendChild(err); bar.appendChild(save); box.appendChild(bar);   // sticky: stays above the keyboard (--kb) and the bottom edge
+    var zero = btn('tbtn c', 'ไม่พบเลย (0)'); zero.style.marginTop = '8px';
+    zero.addEventListener('click', function () { doSave(0); }); box.appendChild(zero); zeroBtn = zero;
     if (card.mode === 'scan') startPieceCamera();
   }
 
+  var qtyEl = null, zeroBtn = null, zeroArm = false, zeroTimer = null;   // the quantity box and the "ไม่พบเลย (0)" button of the open part card
+  /** a message under the card's fields WITHOUT redrawing it (a redraw drops the keyboard, the typed text and the camera) */
+  function cardFail(msg) {
+    card.err = msg;
+    var e = $('cardErr');
+    if (!e) { drawCard(); return; }
+    e.className = 'msg err'; e.textContent = msg; e.setAttribute('role', 'alert');
+    try { if (typeof e.scrollIntoView === 'function') e.scrollIntoView({ block: 'nearest' }); } catch (x) { /* the message is there anyway */ }
+  }
+  function clearCardErr() { if (card && card.err) { card.err = ''; var ce = $('cardErr'); if (ce) { ce.className = ''; ce.textContent = ''; } } }
+  /** ไม่พบเลย (0) while a quantity is typed / scanned: the first tap only asks again (4 s), the second saves 0. With no quantity present it saves at once. true = hold the save. */
+  function zeroNeedsSecondTap() {
+    var present = false;
+    try { present = card.mode === 'scan' ? Number(card.qty) > 0 : Number(($('qtyIn') || {}).value) > 0; } catch (e) { present = false; }
+    if (!present) return false;
+    if (zeroArm) { zeroArm = false; clearTimeout(zeroTimer); return false; }
+    zeroArm = true; if (zeroBtn) zeroBtn.textContent = 'กดอีกครั้งเพื่อบันทึก 0 ชิ้น';
+    clearTimeout(zeroTimer); zeroTimer = setTimeout(function () { zeroArm = false; if (zeroBtn) zeroBtn.textContent = 'ไม่พบเลย (0)'; }, 4000);
+    return true;
+  }
   function drawShelfPicker(box) {
     box.appendChild(el('div', 'caption', 'เลือกชั้นวาง'));
     var grp = el('div', 'group');
@@ -2184,13 +2284,15 @@ if (typeof document !== 'undefined') (function () {
       var b = btn('shelfpick item'), two = el('div', 'two');
       two.appendChild(el('div', 'l1', s.shelf)); two.appendChild(el('div', 'l2', s.done ? 'นับแล้ว ' + s.doneOn + ' โดย ' + s.doneBy : 'ยังไม่ได้นับ'));
       b.appendChild(two); b.appendChild(ic('chevron-right'));
-      b.addEventListener('click', function () { card.shelf = s.shelf; card.other = !!s.extra; card.err = ''; drawCard(); });   // a counted typed shelf saves as otherShelf
+      b.addEventListener('click', function () { card.shelf = s.shelf; card.other = !!s.extra; card.err = ''; drawCard(); focusQty(); });   // a counted typed shelf saves as otherShelf
       grp.appendChild(b);
     });
     var o = btn('shelfpick item'), ot = el('div', 'two');
     ot.appendChild(el('div', 'l1', 'ชั้นอื่น (ไม่มีในรายการ)')); ot.appendChild(el('div', 'l2', 'ต้องพิมพ์ชื่อชั้นวาง')); o.appendChild(ot);
     var form = el('div', 'panel fldwrap'); form.hidden = !card.otherOpen;
     var inp = el('input'); inp.type = 'text'; inp.maxLength = 40; inp.placeholder = 'เช่น A-05'; inp.value = str(card.otherDraft);
+    fieldAttrs(inp, { autocapitalize: 'characters', autocomplete: 'off', autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'done' });
+    inp.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); ok.click(); } });
     inp.addEventListener('input', function () { card.otherDraft = inp.value; fdSave(); });
     o.addEventListener('click', function () { card.otherOpen = true; form.hidden = false; inp.focus(); fdSave(); });
     grp.appendChild(o); box.appendChild(grp);
@@ -2202,7 +2304,7 @@ if (typeof document !== 'undefined') (function () {
       if (!v) { msg.className = 'msg err spaced'; msg.textContent = 'กรุณาพิมพ์ชื่อชั้นวาง'; return; }
       var same = L.findShelf(card.shelves, 'shelf', v);   // a name that is already a shelf of this part is that shelf (no duplicate)
       if (same) { card.shelf = same.shelf; card.other = !!same.extra; } else { card.shelf = v; card.other = true; }
-      card.err = ''; drawCard();
+      card.err = ''; drawCard(); focusQty();
     });
     form.appendChild(ok); box.appendChild(form);
   }
@@ -2212,10 +2314,11 @@ if (typeof document !== 'undefined') (function () {
     var row = el('div', 'stepper');
     var minus = btn('step'); minus.appendChild(ic('minus')); minus.setAttribute('aria-label', 'ลด');
     var inp = el('input'); inp.type = 'number'; inp.inputMode = 'numeric'; inp.min = '0'; inp.step = '1'; inp.id = 'qtyIn'; inp.placeholder = '0'; inp.value = card.qty ? String(card.qty) : '';
+    fieldAttrs(inp, { enterkeyhint: 'done', autocomplete: 'off', pattern: '[0-9]*' }); qtyEl = inp;
     var plus = btn('step'); plus.appendChild(ic('plus')); plus.setAttribute('aria-label', 'เพิ่ม');
-    minus.addEventListener('click', function () { inp.value = String(Math.max(0, (parseInt(inp.value, 10) || 0) - 1)); card.qty = +inp.value; fdSave(); });
-    plus.addEventListener('click', function () { inp.value = String((parseInt(inp.value, 10) || 0) + 1); card.qty = +inp.value; fdSave(); });
-    inp.addEventListener('input', function () { card.qty = Math.max(0, parseInt(inp.value, 10) || 0); fdSave(); });
+    minus.addEventListener('click', function () { inp.value = String(Math.max(0, (parseInt(inp.value, 10) || 0) - 1)); card.qty = +inp.value; fdSave(); clearCardErr(); });
+    plus.addEventListener('click', function () { inp.value = String((parseInt(inp.value, 10) || 0) + 1); card.qty = +inp.value; fdSave(); clearCardErr(); });
+    inp.addEventListener('input', function () { card.qty = Math.max(0, parseInt(inp.value, 10) || 0); fdSave(); clearCardErr(); });
     var ow = el('div', 'of'); ow.appendChild(inp);
     row.appendChild(minus); row.appendChild(ow); row.appendChild(plus); box.appendChild(row);
   }
@@ -2232,6 +2335,7 @@ if (typeof document !== 'undefined') (function () {
     var torch = btn('torch'); torch.id = 'pieceTorch'; torch.setAttribute('aria-label', 'ไฟฉาย'); torch.appendChild(ic('flashlight')); torch.hidden = true; vf.appendChild(torch);
     var zoom = btn('zoom', '2×'); zoom.id = 'pieceZoom'; zoom.hidden = true; vf.appendChild(zoom);
     vf.hidden = !!card.camMsg; box.appendChild(vf);
+    if (!card.camMsg) { vf.classList.add('opening'); video.addEventListener('playing', function () { vf.classList.remove('opening'); }); }   // "กำลังเปิดกล้อง…" until the first frame
     var ph = el('div', 'msg err', L.HINT_1D); ph.id = 'pieceHint'; ph.hidden = true; box.appendChild(ph);
     var cm = el('div', card.camMsg ? 'msg err' : ''); cm.id = 'camMsg'; cm.textContent = card.camMsg; box.appendChild(cm);
     if (card.camMsg) {
@@ -2245,7 +2349,7 @@ if (typeof document !== 'undefined') (function () {
     var r = btn('fbtn', 'ล้าง'); r.addEventListener('click', function () { card.qty = 0; card.lock = ''; card.warn = ''; setBig(); });
     g.appendChild(m); g.appendChild(r); box.appendChild(g);
   }
-  function setBig() { fdSave(); var b = $('bigqty'); if (b) b.textContent = String(card.qty); var w = $('pieceWarn'); if (w) { w.textContent = card.warn; w.className = card.warn ? 'msg err' : ''; } }
+  function setBig() { fdSave(); if (Number(card.qty) > 0) clearCardErr(); var b = $('bigqty'); if (b) b.textContent = String(card.qty); var w = $('pieceWarn'); if (w) { w.textContent = card.warn; w.className = card.warn ? (/^กำลัง/.test(card.warn) ? 'hint' : 'msg err') : ''; } }
   function pieceWarn(t) { if (!card) return; card.warn = t; setBig(); }
 
   function startPieceCamera() {
@@ -2267,8 +2371,8 @@ if (typeof document !== 'undefined') (function () {
   function onPiece(text) {
     if (!card || card.unknown || card.mode !== 'scan') return;
     var d = L.scanDecision(card.codes, card.lock, text);
-    if (d.action === 'count') { card.qty++; card.lock = d.lock; card.warn = ''; beep(); buzz(60); setBig(); }
-    else if (d.action === 'wrong') { card.warn = 'บาร์โค้ดไม่ตรงกับชิ้นนี้ ไม่นับ'; beep(); buzz([80, 60, 80]); setBig(); }
+    if (d.action === 'count') { card.qty++; card.lock = d.lock; card.warn = ''; beep(); buzz(60); setBig(); pulse('bigqty', [{ transform: 'scale(1.2)' }, { transform: 'scale(1)' }], 160); }
+    else if (d.action === 'wrong') { card.warn = 'บาร์โค้ดไม่ตรงกับชิ้นนี้ ไม่นับ'; beep(); buzz([80, 60, 80]); setBig(); pulse('pieceWarn', [{ transform: 'translateX(-6px)' }, { transform: 'translateX(6px)' }, { transform: 'translateX(-4px)' }, { transform: 'translateX(0)' }], 240); }
   }
 
   /** A count at a branch needs no shelf name: the server uses the branch itself as the place. The main shop still asks for one. */
@@ -2287,18 +2391,21 @@ if (typeof document !== 'undefined') (function () {
     var m = el('div', 'msg err'); m.id = 'unknownMsg'; m.appendChild(document.createTextNode('อ่านได้: ')); m.appendChild(el('span', 'code', card.ucode)); m.appendChild(document.createTextNode(' — ไม่มีในรายการอะไหล่')); box.appendChild(m);
     box.appendChild(el('div', 'caption', 'บันทึกเป็นรหัสไม่รู้จัก เพื่อให้เจ้าของตรวจสอบ'));
     var c = el('div', 'panel fldstack');
-    var q = el('input'); q.type = 'number'; q.inputMode = 'numeric'; q.min = '0'; q.placeholder = '0'; q.value = card.qty; q.addEventListener('input', function () { card.qty = q.value; udSave(); }); c.appendChild(ofield('uqty', 'จำนวนที่นับได้', q));
-    var s = el('input'); s.type = 'text'; s.maxLength = 40; s.placeholder = needShelf() ? 'เช่น A-05' : 'ไม่ต้องกรอกก็ได้'; s.value = card.ushelf; s.addEventListener('input', function () { card.ushelf = s.value.trim(); udSave(); }); c.appendChild(ofield('ushelf', needShelf() ? 'ชื่อชั้นวาง' : 'ชื่อชั้นวาง (ถ้ามี)', s));
+    var q = el('input'); q.type = 'number'; q.inputMode = 'numeric'; q.min = '0'; fieldAttrs(q, { enterkeyhint: 'next', autocomplete: 'off' }); q.placeholder = '0'; q.value = card.qty; q.addEventListener('input', function () { card.qty = q.value; udSave(); }); c.appendChild(ofield('uqty', 'จำนวนที่นับได้', q));
+    var s = el('input'); s.type = 'text'; s.maxLength = 40; s.placeholder = needShelf() ? 'เช่น A-05' : 'ไม่ต้องกรอกก็ได้'; s.value = card.ushelf; s.addEventListener('input', function () { card.ushelf = s.value.trim(); udSave(); }); fieldAttrs(s, { autocapitalize: 'characters', autocomplete: 'off', autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'done' });
+    q.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); s.focus(); } });
+    s.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); if (typeof s.blur === 'function') s.blur(); } });
+    c.appendChild(ofield('ushelf', needShelf() ? 'ชื่อชั้นวาง' : 'ชื่อชั้นวาง (ถ้ามี)', s));
     box.appendChild(c);
     // a part that is not in DMS needs a photo of the product before it can be saved: its own section (header + badge, one big tile that opens the camera, a one-line warning)
     var sec = el('div', 'ph'); box.appendChild(sec);
     var head = el('div', 'phhead'); head.appendChild(el('b', '', 'รูปสินค้า')); head.appendChild(el('span', 'req' + (card.photo ? ' done' : ''), card.photo ? 'ถ่ายแล้ว ✓' : 'จำเป็น')); sec.appendChild(head);
-    var tile = el('label', 'phtile' + (card.photo ? ' has' : '')); sec.appendChild(tile);
+    var tile = el('label', 'phtile' + (card.photo ? ' has' : '')), txs = null; sec.appendChild(tile);
     if (card.photo) {
       var prev = el('img'); prev.alt = 'รูปสินค้า'; prev.src = card.photo; tile.appendChild(prev);
       var rt = el('span', 'retake'); rt.appendChild(ic('camera')); rt.appendChild(el('span', '', 'ถ่ายใหม่')); tile.appendChild(rt);
     } else {
-      var cm = el('span', 'cam'); cm.appendChild(ic('camera', 'big')); tile.appendChild(cm); tile.appendChild(el('span', 'tx', 'แตะเพื่อถ่ายรูปสินค้า'));
+      var cm = el('span', 'cam'); cm.appendChild(ic('camera', 'big')); tile.appendChild(cm); txs = el('span', 'tx', 'แตะเพื่อถ่ายรูปสินค้า'); tile.appendChild(txs);
     }
     var pf = el('input'); pf.type = 'file'; pf.id = 'uphoto'; pf.accept = 'image/*'; pf.setAttribute('capture', 'environment'); pf.style.position = 'absolute'; pf.style.left = '-9999px'; tile.appendChild(pf);
     var pg = null;   // after a tab reload the shot just taken may be in the gallery: a second picker WITHOUT capture opens it (a low-memory phone can kill the page each time the camera app opens)
@@ -2312,6 +2419,7 @@ if (typeof document !== 'undefined') (function () {
       var f = inp.files && inp.files[0]; if (!f) return;
       card.qty = q.value; card.ushelf = s.value.trim();
       var mine = card;
+      tile.classList.add('busy'); if (txs) txs.textContent = 'กำลังเตรียมรูป…';   // decoding a big photo takes up to 2 s on a cheap phone
       shrinkPhoto(f, function (data) {
         if (card !== mine) return;
         if (data) { card.photo = data; card.err = ''; } else card.err = 'อ่านรูปไม่ได้ ถ่ายรูปใหม่อีกครั้ง';
@@ -2326,25 +2434,26 @@ if (typeof document !== 'undefined') (function () {
       card.qty = q.value; card.ushelf = s.value.trim();
       var bad = L.unknownCheck(card.qty, card.ushelf, needShelf(), card.photo);
       if (bad) { card.err = bad; drawCard(); return; }
-      if (!verified) { toast('ยังบันทึกไม่ได้ รอให้ระบบตรวจรหัสก่อน'); return; }
+      if (!verified) { toast('ยังบันทึกไม่ได้ รอให้ระบบตรวจรหัสก่อน', undefined, 'bad'); return; }
       var code = card.ucode, shelf = card.ushelf, qty = card.qty, photo = card.photo, loc = card.uloc || card.loc || L.saveLoc(M, pickLoc);
       var ce = enqueue('fc', L.unknownBody(code, shelf, qty, loc), 'รหัสไม่รู้จัก ' + code);
       enqueuePhoto(code, shelf, qty, loc, photo, ce && ce.rid);
-      toast('บันทึกแล้ว'); backHome();
+      toast('บันทึกแล้ว', undefined, 'ok'); backHome();
     });
     box.appendChild(b);
   }
 
   /** Save = optimistic: the item leaves the list at once, the card closes, the request goes through the queue. */
   function doSave(q) {
-    if (!verified) { toast('ยังบันทึกไม่ได้ รอให้ระบบตรวจรหัสก่อน'); return; }
+    if (!verified) { toast('ยังบันทึกไม่ได้ รอให้ระบบตรวจรหัสก่อน', undefined, 'bad'); return; }
+    if (q === 0 && zeroNeedsSecondTap()) return;   // ไม่พบเลย (0) with a quantity present: asks once more
     var wq = L.whole(q);   // the server's rule exactly: '1.5', '1e2', '-1', 1000000 never get queued
-    if (wq === null) { card.err = 'กรุณาใส่จำนวนที่นับได้ (ไม่พบเลยให้กด "ไม่พบเลย")'; drawCard(); return; }
-    if (wq !== wq) { card.err = L.WHOLE_ONLY; drawCard(); return; }
+    if (wq === null) { cardFail('กรุณาใส่จำนวนที่นับได้ (ไม่พบเลยให้กด "ไม่พบเลย")'); return; }
+    if (wq !== wq) { cardFail(L.WHOLE_ONLY); return; }
     q = wq;
     var body = card.ext ? L.unknownBody(card.code2 || card.codes[0], card.shelf, q, card.loc || L.saveLoc(M, pickLoc), card.mode) : L.fcBody(card, q, card.mode, card.loc || L.saveLoc(M, pickLoc));   // a part from another location is saved exactly like an unknown code (the server stores the same row)
     enqueue('fc', body, card.name + (card.shelf ? ' ชั้น ' + card.shelf : ''));
-    toast('บันทึกแล้ว');
+    toast('บันทึกแล้ว', undefined, 'ok');
     backHome();
   }
 
@@ -2353,7 +2462,7 @@ if (typeof document !== 'undefined') (function () {
   var scanSession = 0;   // bumped on every open / close of the scan sheet: a photo decode from an older session is dropped
   function openScan() {
     if (switchBlocked()) return;
-    if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
+    if (!verified) { toast(waitMsg()); return; }
     homeMsg('', '');
     $('scan').hidden = false; syncLayer(); drawInstall(); $('scanNote').textContent = 'เล็งบาร์โค้ดให้อยู่ในกรอบ'; $('scanHint').hidden = true;
     closeSettings();   // (the scan sheet is already up, so the history entry stays)
@@ -2367,7 +2476,7 @@ if (typeof document !== 'undefined') (function () {
   function startScanCam() {
     camStop();
     if (photoDecoding) return;   // a photo is being read: the live camera must stay off until decodePhoto has called back
-    photoUi('');
+    photoUi(''); scanOpening(true);
     var hint = L.makeIgnoreHint(), confirm = L.makeConfirm();
     camStart($('scanVideo'), function (text, view) {
       var k = L.readClass(text, M), now = Date.now();
@@ -2378,21 +2487,24 @@ if (typeof document !== 'undefined') (function () {
       // a read from the whole-frame / strip views can be a neighbour's label: it must be seen twice (like an unknown code) before a card opens; band reads open at once
       if (!L.isWideView(view) && L.findPart(M, code) >= 0) { camStop(); $('scan').hidden = true; beep(); buzz(60); lookup(code, true); syncLayer(); drawInstall(); return; }
       if (confirm.add(L.normScan(code))) { camStop(); $('scan').hidden = true; beep(); buzz(60); lookup(code, true); syncLayer(); drawInstall(); }   // a plausible code that is not in the list: only after the same code was read twice in a row
-    }, function (msg) { $('scanNote').textContent = msg; }, { torch: $('scanTorch'), zoom: $('scanZoom'), frame: $('scanVf'), tapFocus: true, onWait: function (on) { $('scanNote').textContent = on ? 'กำลังโหลดตัวอ่าน…' : 'เล็งบาร์โค้ดให้อยู่ในกรอบ'; }, switchBtn: $('scanSwitch'), onSwitch: function () { startScanCam(); }, onIdle: function () { $('scanNote').textContent = 'ถือห่าง 15–20 ซม. ให้บาร์โค้ดอยู่ในกรอบ หรือกดถ่ายรูปแทน'; } });
+    }, function (msg) { scanOpening(false); $('scanNote').textContent = msg; }, { torch: $('scanTorch'), zoom: $('scanZoom'), frame: $('scanVf'), tapFocus: true, onWait: function (on) { $('scanNote').textContent = on ? 'กำลังโหลดตัวอ่าน…' : 'เล็งบาร์โค้ดให้อยู่ในกรอบ'; }, switchBtn: $('scanSwitch'), onSwitch: function () { startScanCam(); }, onIdle: function () { $('scanNote').textContent = 'ถือห่าง 15–20 ซม. ให้บาร์โค้ดอยู่ในกรอบ หรือกดถ่ายรูปแทน'; } });
   }
   var scanRej = L.makeRejectNotes();   // one rejected-read note per distinct raw value per scan session (reset when the sheet opens)
   /** which candidate of a read to use: the first that is in the part list (so a lot / quantity suffix does not hide the part), else the first plausible one */
   function bestRead(k) { for (var i = 0; i < k.cands.length; i++) if (M && L.findPart(M, k.cands[i]) >= 0) return k.cands[i]; return k.cands[0]; }
   /** the photo part of the scan sheet: '' = nothing, 'busy' = reading (spinner), 'fail' = could not read (message + ถ่ายใหม่) */
+  /** the viewfinder says "กำลังเปิดกล้อง…" until the first video frame plays (or the camera failed / the sheet closed) */
+  function scanOpening(on) { try { var v = $('scanVf'); if (v && v.classList) v.classList.toggle('opening', !!on); } catch (e) {} }
   function photoUi(mode) {
+    if (mode) scanOpening(false);
     $('scanBusy').hidden = mode !== 'busy'; $('scanFail').hidden = mode !== 'fail'; $('scanFile').disabled = mode === 'busy';
   }
   var pickerOpen = false;   // the iOS/Android photo picker of the scan sheet is open (set on its click, cleared on change / cancel)
   function resumeScanCam() { if (!$('scan').hidden && !document.hidden) startScanCam(); }
-  function closeScan() { scanSession++; try { var dg = $('scanDiag'); if (dg) dg.hidden = true; } catch (e) {} camStop(); photoUi(''); $('scan').hidden = true; syncLayer(); geoFlush(); drawInstall(); }
+  function closeScan() { scanSession++; try { var dg = $('scanDiag'); if (dg) dg.hidden = true; } catch (e) {} scanOpening(false); camStop(); photoUi(''); $('scan').hidden = true; syncLayer(); geoFlush(); drawInstall(); }
   function lookup(code, viaScan) {
     if (switchBlocked()) return;
-    if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
+    if (!verified) { toast(waitMsg()); return; }
     homeMsg('', '');
     var p = L.findPart(M, code);
     if (p >= 0) { var c = L.cardOf(M, p, false); openCard(c, undefined, !!viaScan); }
@@ -2405,14 +2517,14 @@ if (typeof document !== 'undefined') (function () {
   /** a tapped suggestion: the card of THAT part (by index, not by re-reading its code), the same card lookup() builds */
   function openPart(p) {
     if (switchBlocked()) return;
-    if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }   // refused: the typed text and the list stay
+    if (!verified) { toast(waitMsg()); return; }   // refused: the typed text and the list stay
     hideSug(); homeMsg('', '');
     openCard(L.cardOf(M, p, false), undefined, false);
   }
   /** the "not in the list" row / search with no exact match and no suggestions: the same unknown-code screen lookup() ends in */
   function openUnknownTyped(text) {
     if (switchBlocked()) return;
-    if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }
+    if (!verified) { toast(waitMsg()); return; }
     hideSug(); homeMsg('', '');
     openUnknown(text);
   }
@@ -2454,7 +2566,7 @@ if (typeof document !== 'undefined') (function () {
     var fp = M ? L.findPart(M, v) : -1, vp = M && fp < 0 ? L.findPartVariant(M, v) : -1;
     if (M && fp < 0 && vp < 0 && L.isFullCode(v)) { openUnknownTyped(v.trim()); return; }   // a whole code that is not listed: like a scan of an unlisted product (refused while not verified: the text stays)
     if (M && fp < 0 && vp < 0 && L.suggestMatches(M, v, 1).total > 0) { sugHint = true; renderSug(); return; }
-    if (!verified) { toast('รอสักครู่ กำลังตรวจรหัส'); return; }   // refused: keep the typed text
+    if (!verified) { toast(waitMsg()); return; }   // refused: keep the typed text
     hideSug(); lookup(vp >= 0 ? (M.parts[vp].code2 || M.parts[vp].c1) : v, false);
   }
 
@@ -2935,7 +3047,7 @@ if (typeof document !== 'undefined') (function () {
     c.appendChild(el('span', 'grow', it.shelf.split(' · ')[0] + ' · ' + it.name));
     return c;
   }
-  function numInput(ph) { var i = el('input'); i.type = 'number'; i.inputMode = 'numeric'; i.min = '0'; i.step = '1'; i.placeholder = ph || ''; return i; }
+  function numInput(ph) { var i = el('input'); i.type = 'number'; i.inputMode = 'numeric'; i.min = '0'; i.step = '1'; i.placeholder = ph || ''; fieldAttrs(i, { enterkeyhint: 'next', autocomplete: 'off' }); return i; }
   // Resize to max 1024px JPEG (~0.7) so photos stay small on cheap phones.
   function shrink(file, cb) {
     var url = URL.createObjectURL(file), img = new Image();
@@ -2991,6 +3103,7 @@ if (typeof document !== 'undefined') (function () {
       if (d[1] === 'crates') crates = i; else if (d[1] === 'per') per = i; else loose = i;
     });
     crates.value = st.crates; per.value = st.per; loose.value = st.loose;
+    var nextBox = function (from, to) { from.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); if (typeof to.focus === 'function') to.focus(); } }); };   // Enter = the next box
     total = el('div', 'total', 'รวม 0 ชิ้น'); c.appendChild(total);
     var recalc = function () { total.textContent = 'รวม ' + ((+crates.value || 0) * (+per.value || 0) + (+loose.value || 0)) + ' ชิ้น'; };
     // each box updates ONLY its own field of the draft (a card that was not redrawn after a restore has empty boxes: copying all three would wipe the restored values)
@@ -3003,7 +3116,9 @@ if (typeof document !== 'undefined') (function () {
     var file = el('input'); file.type = 'file'; file.accept = 'image/*'; file.setAttribute('capture', 'environment'); file.style.position = 'absolute'; file.style.left = '-9999px'; pick.appendChild(file);
     var prev = el('img', 'photo-prev'); prev.alt = ''; fld.appendChild(prev);
     var foundAt = el('input'); foundAt.type = 'text'; foundAt.maxLength = 80; foundAt.value = st.foundAt; foundAt.addEventListener('input', function () { st.foundAt = foundAt.value; ddSave(); });
-    foundAt.setAttribute('aria-label', 'เจอที่ไหนบ้าง');
+    foundAt.setAttribute('aria-label', 'เจอที่ไหนบ้าง'); fieldAttrs(foundAt, { autocomplete: 'off', enterkeyhint: 'done' });
+    nextBox(crates, per); nextBox(per, loose); nextBox(loose, foundAt);
+    foundAt.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); if (typeof foundAt.blur === 'function') foundAt.blur(); } });
     var fof = el('div', 'of'); fof.appendChild(foundAt); foundAt.placeholder = 'เจอที่ไหนบ้าง (จำเป็นถ้านับได้มากกว่า 0)'; c.appendChild(fof);
     var err = el('div', 'msg err'); err.hidden = true; c.appendChild(err);
     function showErr(t) { err.textContent = t; err.hidden = !t; }
@@ -3017,14 +3132,16 @@ if (typeof document !== 'undefined') (function () {
       var f = file.files[0];
       if (!f) return;
       if (L.photoTooOld(f.lastModified, Date.now())) { resetPhoto(); showErr('ถ่ายรูปใหม่ตอนนี้'); return; }
+      pl.textContent = 'กำลังเตรียมรูป…'; pick.classList.add('busy');
       shrink(f, function (data) {
+        pick.classList.remove('busy');
         if (!data) { resetPhoto(); showErr('อ่านรูปไม่ได้ ถ่ายรูปใหม่ตอนนี้'); return; }
         st.photo = data; st.lastModified = f.lastModified;
         prev.src = data; prev.style.display = 'block'; pl.textContent = 'ถ่ายใหม่';
       });
     });
     send.addEventListener('click', function () {
-      if (!verified) { showErr('รอสักครู่ กำลังตรวจรหัส'); return; }
+      if (!verified) { showErr(waitMsg()); return; }
       showErr('');
       var now = Date.now();
       var chk = L.dailyCheck({ crates: crates.value, per: per.value, loose: loose.value, foundAt: foundAt.value, photo: st.photo, lastModified: st.lastModified, now: now });
@@ -3032,7 +3149,7 @@ if (typeof document !== 'undefined') (function () {
       delete prefill[it.id];
       enqueue('daily', L.dailyBody(it.id, chk.answer, foundAt.value, st.photo, st.lastModified, now), it.name);
       ddSave();   // (the item is queued now: its draft leaves the session store)
-      scrollNext = true; toast('บันทึกแล้ว'); renderDaily();
+      scrollNext = true; toast('บันทึกแล้ว', undefined, 'ok'); renderDaily();
     });
     return c;
   }
@@ -3044,6 +3161,7 @@ if (typeof document !== 'undefined') (function () {
       switchLoc(this.value, false);
     });   // a roaming person goes to another location: a fresh list from the server for it
     $('scanBtn').addEventListener('click', openScan);
+    try { $('scanVideo').addEventListener('playing', function () { scanOpening(false); }); } catch (eP) { /* the note below the camera still says what is going on */ }
     $('scanClose').addEventListener('click', closeScan);
     try { wireDiag(); } catch (eD) { /* diagnostics are optional */ }
     $('scanFile').addEventListener('click', function () { pickerOpen = true; camStop(); });   // iOS: the live camera must be off before the photo picker opens
@@ -3065,16 +3183,21 @@ if (typeof document !== 'undefined') (function () {
     });
     $('scanRetake').addEventListener('click', function () { $('scanFile').click(); });
     $('scanLive').addEventListener('click', function () { startScanCam(); });             // the person chose the live camera again
-    $('tabFirst').addEventListener('click', function () { ST.tab = 'first'; ST.shelf = ''; renderChips(); renderList(); });
-    $('tabSecond').addEventListener('click', function () { ST.tab = 'second'; ST.shelf = ''; renderChips(); renderList(); });
+    $('tabFirst').addEventListener('click', function () { ST.tab = 'first'; ST.shelf = ''; listMax = 150; renderChips(); renderList(); });
+    $('tabSecond').addEventListener('click', function () { ST.tab = 'second'; ST.shelf = ''; listMax = 150; renderChips(); renderList(); });
     $('scanBackdrop').addEventListener('click', closeScan);
     $('uncHead').addEventListener('click', function () { ST.expanded = !ST.expanded; renderList(); });   // collapse / expand the uncounted list (presentation only)
     $('codeGo').addEventListener('click', goCode);
     $('codeIn').addEventListener('input', function () { sugHint = false; renderSug(); });
     $('codeIn').addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); goCode(); } });
-    $('shelfSel').addEventListener('change', function () { ST.shelf = this.value; renderList(); });
-    $('q').addEventListener('input', function () { ST.q = this.value; renderList(); });
-    $('showDone').addEventListener('change', function () { ST.showDone = this.checked; renderList(); });
+    $('shelfSel').addEventListener('change', function () { ST.shelf = this.value; listMax = 150; renderList(); });
+    var qTimer = null;   // typing in the search box redraws the list at most once per 120 ms of quiet
+    $('q').addEventListener('input', function () { ST.q = this.value; listMax = 150; clearTimeout(qTimer); qTimer = setTimeout(renderList, 120); });
+    $('q').addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); clearTimeout(qTimer); renderList(); if (typeof this.blur === 'function') this.blur(); } });   // Enter: show the results, close the keyboard
+    var scrollField = function (node) { setTimeout(function () { try { if (document.activeElement && node && node.contains && !node.contains(document.activeElement)) return; if (node && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'start' }); } catch (e) {} }, 250); };   // the suggestions must not open under the keyboard
+    $('codeIn').addEventListener('focus', function () { scrollField(this.parentNode && this.parentNode.parentNode); });
+    $('q').addEventListener('focus', function () { scrollField(this); });
+    $('showDone').addEventListener('change', function () { ST.showDone = this.checked; listMax = 150; renderList(); });
     $('refresh').addEventListener('click', function () { if (refreshBusy) return; if (!card) { refreshSpin(true); doSync(true); } else toast('บันทึกหรือกลับก่อน แล้วค่อยรีเฟรช'); });
     $('qbadge').addEventListener('click', function () { if (Q.length) { Q.forEach(function (e) { e.next = 0; }); pump(); toast('กำลังลองส่งใหม่'); } });
     // the camera must never stay on: closed with the scan sheet, and whenever the page is hidden or left
@@ -3115,11 +3238,25 @@ if (typeof document !== 'undefined') (function () {
     window.addEventListener('beforeunload', function (ev) { if (Q.length && !reloading) { ev.preventDefault(); ev.returnValue = ''; return ''; } });
   }
 
+  /** --kb on <html> = the height of the on-screen keyboard (px), so the Save bar and the toast ride above it. Android Chrome resizes the page itself (innerHeight shrinks too, so this stays 0 there); iPhone does not. No visualViewport = nothing happens. */
+  function wireKeyboard() {
+    try {
+      var vv = window.visualViewport, root = document.documentElement;
+      if (!vv || typeof vv.addEventListener !== 'function' || !root || !root.style || typeof root.style.setProperty !== 'function') return;
+      var last = -1, upd = function () {
+        var kb = Math.max(0, Math.round((window.innerHeight || 0) - vv.height - (vv.offsetTop || 0)));
+        if (kb < 80) kb = 0;
+        if (vv.scale && vv.scale > 1.01) kb = 0;   // a pinch-zoomed page is not a keyboard
+        if (kb !== last) { last = kb; root.style.setProperty('--kb', kb + 'px'); }
+      };
+      vv.addEventListener('resize', upd); vv.addEventListener('scroll', upd); upd();
+    } catch (e) { /* the page still works, the Save bar just stays at the screen bottom */ }
+  }
   /** Fonts load after the first paint (system fonts show at once, the web fonts swap in later); a failure just keeps the system fonts. */
   function loadFonts() {
     try {
       var l = document.createElement('link'); l.rel = 'stylesheet';
-      l.href = 'https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600&family=Roboto:wght@400;500&family=Roboto+Mono:wght@400&display=swap';
+      l.href = 'https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600&family=Roboto:wght@400;500&family=Roboto+Mono:wght@400&display=optional';
       document.head.appendChild(l);
     } catch (e) {}
   }
@@ -3127,8 +3264,8 @@ if (typeof document !== 'undefined') (function () {
   function watchSheet() {
     try {
       if (typeof MutationObserver === 'undefined') return;
-      var sc = $('scan'), sync = function () { document.body.classList.toggle('sheet-open', !sc.hidden); };
-      new MutationObserver(sync).observe(sc, { attributes: true, attributeFilter: ['hidden'] }); sync();
+      var sc = $('scan'), bo = $('bioOffer'), sync = function () { document.body.classList.toggle('sheet-open', !sc.hidden || !!(bo && !bo.hidden)); };
+      var mo = new MutationObserver(sync); mo.observe(sc, { attributes: true, attributeFilter: ['hidden'] }); if (bo) mo.observe(bo, { attributes: true, attributeFilter: ['hidden'] }); sync();
     } catch (e) {}
   }
 
@@ -3247,12 +3384,13 @@ if (typeof document !== 'undefined') (function () {
   function start() {
     // LINE (Android) can hand the link to the real browser: try once; the query string stops a loop, the #hash is kept
     try { if (L.isLineAndroid(navigator.userAgent) && typeof location.replace === 'function' && !/[?&]openExternalBrowser=/.test(String(location.href).split('#')[0])) { location.replace(location.pathname + '?openExternalBrowser=1' + location.hash); return; } } catch (e) {}
+    try { var sp = $('splash'); if (sp) sp.hidden = true; } catch (eS) { /* the static opening screen simply stays */ }   // app.js is running: the "กำลังเปิด…" screen of index.html is done
     applyFont(); loadFonts(); watchSheet();
     try { wireInstall(); } catch (e) { /* the app works without it */ }
     if (L.isLineBrowser(navigator.userAgent)) $('linebanner').hidden = false;   // LINE's in-app browser cannot use the camera
     if (!T) { $('nolink').textContent = 'เปิดแอปจากลิงก์ที่ได้รับครั้งแรก 1 ครั้ง แล้วจึงเพิ่มไปที่หน้าจอโฮม'; $('nolink').hidden = false; return; }
-    buildKeys(); wire(); wireSettings(); bioInit();
-    $('padBack').addEventListener('click', function () { if (setMode !== 'confirm') return; firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); $('padMsg').textContent = ''; });
+    buildKeys(); wire(); wireSettings(); wireKeyboard(); bioInit();
+    $('padBack').addEventListener('click', function () { if (setMode !== 'confirm') return; firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); padSay(''); });
     var all = L.qParse(store.get(KQ), T.t);
     lostList = all.filter(function (e) { return e.lostPhoto; });
     Q = all.filter(function (e) { return !e.lostPhoto; });
