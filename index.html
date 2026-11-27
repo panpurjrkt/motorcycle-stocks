@@ -83,6 +83,10 @@ h1, h2 { margin:0; }
 @keyframes ibspin { to { transform:rotate(360deg); } }
 .busy { display:flex; align-items:center; justify-content:center; gap:10px; padding:10px 0; font-size:15px; font-weight:500; }
 .spinner { width:22px; height:22px; flex:none; border-radius:50%; border:3px solid var(--line); border-top-color:var(--primary); animation:ibspin .8s linear infinite; }
+.scanring { position:relative; width:48px; height:48px; flex:none; display:grid; place-items:center; color:var(--primary); }
+.scanring::before { content:""; position:absolute; inset:0; border-radius:50%; border:2px solid var(--primary); animation:scanpulse 1.3s ease-out infinite; }
+.scanring svg { width:26px; height:26px; }
+@keyframes scanpulse { from { transform:scale(.7); opacity:.7; } to { transform:scale(1.15); opacity:0; } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration:2.4s; } }
 @media (prefers-reduced-motion: reduce) { .ibtn.spin .ic { animation:none; } .ibtn.spin { opacity:.5; } .ibtn:active { transition:none; } }
 /* no double-tap zoom, no 300 ms tap delay (iOS honours touch-action: manipulation) */
@@ -324,6 +328,15 @@ input[type=search] { -webkit-appearance:none; appearance:none; }
 .dots { display:flex; justify-content:center; gap:16px; margin:22px 0 10px; }
 .dots i { width:14px; height:14px; border-radius:50%; border:2px solid var(--outline); transition:background .1s, border-color .1s; }
 .dots i.on { background:var(--primary); border-color:var(--primary); }
+.dots i.pop { animation:dotpop .15s ease-out; }
+.dots i.out { animation:dotout .18s ease-out; }
+.dots.chk i.on { animation:dotpulse .9s ease-in-out infinite; }
+.dots.ok i.on { background:var(--ok); border-color:var(--ok); }
+.dots.bad i { border-color:var(--bad-ink); }
+.dots.bad i.on { background:var(--bad-ink); }
+@keyframes dotpop { 50% { transform:scale(1.35); } }
+@keyframes dotout { from { background:var(--primary); border-color:var(--primary); } }
+@keyframes dotpulse { 50% { transform:scale(.8); opacity:.55; } }
 .padmsg { min-height:28px; color:var(--bad-ink); font-size:14px; font-weight:500; margin-bottom:10px; }
 .padmsg.wait { color:var(--mute); }
 .padmsg.wait::before { content:""; display:inline-block; width:14px; height:14px; margin-right:8px; vertical-align:-2px; border-radius:50%; border:2px solid var(--line); border-top-color:var(--primary); animation:ibspin .8s linear infinite; }
@@ -483,6 +496,7 @@ button.item:active, .lrow:active, .srow:active, .unc-head:active, .sbhead:active
 .cbrow:active .box { border-color:var(--primary); }
 button:active, .lrow:active, .phtile:active, label.fbtn:active, label.tbtn:active, .cbrow:active, .step:active, .setsw:active::before { transition-duration:0s; }
 .keys button.del:active { background:var(--tonal); }
+.keys button:active { transition-duration:0s; }   /* the pressed look shows at touch-down, no delay (it still fades out over .25 s) */
 
 /* the save button stays above the keyboard (S3): --kb is the keyboard height, set by app.js from visualViewport */
 .savebar { position:sticky; bottom:calc(max(8px, env(safe-area-inset-bottom, 0px)) + var(--kb, 0px)); z-index:5; padding:8px 0 0; background:var(--bg); }
@@ -549,7 +563,7 @@ body.card-open .toast { bottom:calc(max(20px, env(safe-area-inset-bottom, 0px)) 
     <div class="padmsg" id="padMsg" role="alert"></div>
     <div class="keys" id="keys"></div>
     <div id="bioBox" class="stack" hidden style="width:100%;max-width:320px;margin-top:14px">
-      <div id="bioBusy" class="busy" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="bioBusyTxt">กำลังสแกน…</span></div>
+      <div id="bioBusy" class="busy" role="status" hidden><span class="scanring" aria-hidden="true"><svg id="bioIcFp" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 4a7 7 0 0 0-7 7v2"/><path d="M12 7a4 4 0 0 0-4 4v3.5c0 1.5-.4 2.7-1 3.5"/><path d="M12 10a1.2 1.2 0 0 0-1.2 1.2v3.3c0 2-.6 3.6-1.5 4.8"/><path d="M15.5 11a3.5 3.5 0 0 0-1.2-2.6"/><path d="M15.5 14.5c0 2.2-.6 4.2-1.8 5.8"/><path d="M19 11a7 7 0 0 0-3-5.7"/><path d="M19 15c0 1.8-.3 3-.9 4.2"/></svg><svg id="bioIcFace" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M9 9.5v1.5M15 9.5v1.5M12 9.5v3.5h-1M9 15.5c1.8 1.6 4.2 1.6 6 0"/></svg></span><span id="bioBusyTxt">กำลังสแกน…</span></div>
       <button type="button" class="pbtn" id="bioTap" hidden style="min-height:64px;font-size:20px;font-weight:600">แตะเพื่อสแกน</button>
       <button type="button" class="tbtn c" id="bioAgain" hidden style="min-height:52px;font-size:17px">สแกนอีกครั้ง</button>
       <button type="button" class="tbtn c" id="bioPinLink" hidden style="min-height:48px;font-size:16px">ใช้รหัส PIN แทน</button>
@@ -754,6 +768,6 @@ body.card-open .toast { bottom:calc(max(20px, env(safe-area-inset-bottom, 0px)) 
   <div class="toast" id="toast" role="status" hidden></div>
 </div>
 <!-- BUMP the ?v= number below every time web/app.js changes (stale-JS guard: GitHub Pages caches 10 min, new HTML + old JS = blank page) -->
-<script src="app.js?v=2026112601"></script>
+<script src="app.js?v=2026112701"></script>
 </body>
 </html>

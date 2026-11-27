@@ -234,7 +234,7 @@ var StockLib = (function () {
   L.dailyCount = function (done, total) { return total > 0 && done >= total ? { full: true } : { full: false, done: done, total: total }; };
 
   /* ---- Settings page (the gear): pure helpers ---- */
-  L.APP_VERSION = '2026112601';   // = the ?v= number on app.js in index.html (bump both together)
+  L.APP_VERSION = '2026112701';   // = the ?v= number on app.js in index.html (bump both together)
   /** The ?v= number in the address of a script (null when there is none): '.../app.js?v=2026112403' -> '2026112403'. */
   L.srcVersion = function (src) { var m = /[?&]v=([^&#]*)/.exec(str(src)); return m ? m[1] : null; };
   /** After a deploy the CDN can serve an OLD index.html with the NEW app.js (or the reverse) for about 10 minutes: true when this script's own ?v= differs from the version inside it. No ?v= (or no script found) = nothing to compare = false. */
@@ -1053,7 +1053,7 @@ if (typeof document !== 'undefined') (function () {
     ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'ลบ'].forEach(function (d) {
       var b = el('button', '', d); b.type = 'button';
       if (d === '') { b.disabled = true; b.style.visibility = 'hidden'; }
-      else if (d === 'ลบ') { b.className = 'del'; b.setAttribute('aria-label', 'ลบ'); b.addEventListener('click', function () { padBuf = padBuf.slice(0, -1); drawDots(); }); }
+      else if (d === 'ลบ') { b.className = 'del'; b.setAttribute('aria-label', 'ลบ'); b.addEventListener('click', function () { if (padBusy || !padBuf) return; tick(); var at = padBuf.length - 1; padBuf = padBuf.slice(0, -1); drawDots(-1, at); }); }
       else b.addEventListener('click', function () { padPress(d); });
       k.appendChild(b);
     });
@@ -1064,9 +1064,33 @@ if (typeof document !== 'undefined') (function () {
     var w = /^กำลัง/.test(text), m = $('padMsg'), k = $('keys');
     m.textContent = text;
     try { if (m.classList) m.classList.toggle('wait', w); if (k && k.classList) k.classList.toggle('wait', w); } catch (e) { /* plain text only */ }
+    dotsClass('chk', w);   // the four dots pulse together with the wait line
   }
   function shakeDots() { try { var d = $('dots'); if (!d || !d.classList) return; d.classList.add('shake'); setTimeout(function () { d.classList.remove('shake'); }, 400); } catch (e) {} }
-  function drawDots() { var d = $('dots').children; for (var i = 0; i < d.length; i++) d[i].className = i < padBuf.length ? 'on' : ''; }
+  /* ---- PIN pad feedback: a short tick per key, a pop on the dot just filled, green dots + a success buzz on accept, red dots + shake + error buzz on a refusal. Colour carries the feedback where there is no vibration (iPhone) or no motion (reduced motion: app CSS turns animations off). ---- */
+  var badTimer = null;
+  function tick() { buzz(12); }   // one short tick for an accepted key tap (never for a refused one)
+  function buzzOk() { buzz([30, 50, 30]); }   // the success pattern (code accepted, scan read, Face ID switched on)
+  function dotsClass(c, on) { try { var d = $('dots'); if (d && d.classList) d.classList.toggle(c, !!on); } catch (e) {} }
+  function dotsPlain() { dotsClass('ok', false); dotsClass('bad', false); }
+  /** pop: index of the dot that was just filled (-1 = none, 'all' = every dot, e.g. after a scan); out: index of the dot that was just emptied */
+  function drawDots(pop, out) {
+    var d = $('dots').children; clearTimeout(badTimer); dotsPlain();
+    for (var i = 0; i < d.length; i++) d[i].className = i < padBuf.length ? 'on' + (pop === i || pop === 'all' ? ' pop' : '') : (out === i ? 'out' : '');
+  }
+  function dotsFill(mode) { var d = $('dots').children; dotsClass('chk', false); dotsClass('ok', mode === 'ok'); dotsClass('bad', mode === 'bad'); for (var i = 0; i < d.length; i++) d[i].className = 'on'; }
+  /** a refused code (wrong / locked / the two typed codes differ): dots go red for the shake, then empty again unless the person already typed */
+  function padBad() {
+    dotsFill('bad'); buzz([60, 60, 60]); shakeDots();
+    clearTimeout(badTimer); badTimer = setTimeout(function () { badTimer = null; if (padBuf === '') drawDots(); }, 450);
+  }
+  /** the server accepted the code: dots green + success buzz; where the page can draw frames and the pad is on screen, the pad stays 220 ms so the green is seen, then go() runs exactly as before */
+  function padWin(go) {
+    dotsFill('ok'); if (!bioSourced) buzzOk();   // (a scan already buzzed when it was read)
+    if (typeof window.requestAnimationFrame !== 'function' || $('pad').hidden) { go(); return; }
+    var g = padGen; padBusy = true;
+    setTimeout(function () { if (g !== padGen) return; padBusy = false; go(); }, 220);   // (a pad that came up again meanwhile wins: nothing is accepted behind it)
+  }
   function lockKeys(on) { var b = $('keys').querySelectorAll('button'); for (var i = 0; i < b.length; i++) if (b[i].textContent !== '') b[i].disabled = on; }
   /** Shows the pad (wrong PIN / lock / first open). The queue and the lists stay in memory: nothing is lost. */
   var setMode = '', firstPin = '';   // setMode: '' = ordinary PIN pad, 'enter' = choose a code, 'confirm' = type it again (the first one stays in memory only, like the PIN)
@@ -1086,7 +1110,7 @@ if (typeof document !== 'undefined') (function () {
     if (!$('scan').hidden) closeScan();   // closeScan also syncs the back-history entry; any open card is kept as it was
     closeSettings();
     padSay(msg || ''); lockKeys(!!locked);
-    if (msg && !set) { buzz([60, 60, 60]); shakeDots(); }   // a refused / locked / changed code: felt and seen, not only read
+    if (msg && !set) padBad();   // a refused / locked / changed code: felt and seen, not only read
     drawVerify();
     clearTimeout(syncTimer); clearTimeout(lockTimer);
     if (locked) lockTimer = setTimeout(function () { padLocked = false; lockKeys(false); padSay(''); bioDraw(); }, 15 * 60 * 1000 + 3000);
@@ -1094,7 +1118,7 @@ if (typeof document !== 'undefined') (function () {
   }
   function padPress(d) {
     if (padBusy || padBuf.length >= 4) return;
-    padBuf += d; drawDots();
+    tick(); padBuf += d; drawDots(padBuf.length - 1);
     if (padBuf.length === 4 && setMode) { setPress(padBuf); return; }
     if (padBuf.length === 4) {
       feedPin(padBuf, false);
@@ -1103,7 +1127,7 @@ if (typeof document !== 'undefined') (function () {
   /** A whole PIN (typed, or decrypted after a scan) goes the one way: held back while the "does this link need a PIN" probe is out, else straight to the server. */
   function feedPin(pin, fromBio) {
     bioSourced = !!fromBio; typedByHand = !fromBio;
-    if (fromBio) { padBuf = pin; drawDots(); }
+    if (fromBio) { padBuf = pin; drawDots('all'); }
     if (probing) { pendingPin = pin; padSay('กำลังตรวจรหัส…'); padBusy = true; return; }   // the "does this link need a PIN" probe is still out
     submitPin(pin);
   }
@@ -1113,7 +1137,7 @@ if (typeof document !== 'undefined') (function () {
       firstPin = typed; setMode = 'confirm'; padBuf = ''; drawDots(); drawSetMode(); padSay(''); return;
     }
     if (typed !== firstPin) {
-      firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); padSay('รหัสไม่ตรงกัน ลองใหม่'); return;
+      firstPin = ''; setMode = 'enter'; padBuf = ''; drawDots(); drawSetMode(); padSay('รหัสไม่ตรงกัน ลองใหม่'); padBad(); return;
     }
     padBusy = true; PIN = typed; bioSourced = false; typedByHand = true; padSay('กำลังบันทึกรหัส…');
     api('setpin', {}, function (res) {
@@ -1184,7 +1208,7 @@ if (typeof document !== 'undefined') (function () {
     $('dots').hidden = sc || tp; $('keys').hidden = sc || tp;
     $('bioBusy').hidden = !sc; $('bioTap').hidden = !tp; $('bioAgain').hidden = !again; $('bioPinLink').hidden = !(sc || tp);
     $('bioBox').hidden = !(sc || tp || again);
-    if (sc) { $('padSub').textContent = 'สแกน ' + lab + ' เพื่อเข้า'; $('bioBusyTxt').textContent = 'กำลังสแกน ' + lab + '…'; }
+    if (sc) { $('padSub').textContent = 'สแกน ' + lab + ' เพื่อเข้า'; $('bioBusyTxt').textContent = 'กำลังสแกน ' + lab + '…'; try { $('bioIcFp').style.display = lab === 'Face ID' ? 'none' : ''; $('bioIcFace').style.display = lab === 'Face ID' ? '' : 'none'; } catch (e) {} }
     else if (tp) $('padSub').textContent = 'แตะปุ่มแล้วสแกน ' + lab;
     else drawSetMode();
   }
@@ -1215,19 +1239,19 @@ if (typeof document !== 'undefined') (function () {
       if (gen !== bioGen) return;
       bioCtl = null; bioState = 'idle';
       if (verified || $('pad').hidden || setMode || padLocked) { bioDraw(); return; }   // (a link with no PIN got in meanwhile)
-      bioDraw(); feedPin(pin, true);
+      bioDraw(); buzzOk(); feedPin(pin, true);
     }, function (err) {
       if (gen !== bioGen) return;
       bioCtl = null;
       var name = err && err.name;
       if (step === 'open' || (err && err.unusable)) {   // the saved code cannot be decrypted (scan data reset on the phone): useless, delete it
-        bioDelete(); bioState = 'idle'; padSay('ใช้การสแกนไม่ได้ ใส่รหัส PIN'); bioDraw(); return;
+        bioDelete(); bioState = 'idle'; padSay('ใช้การสแกนไม่ได้ ใส่รหัส PIN'); bioDraw(); padBad(); return;
       }
       if (!retried && !auto && (name === 'InvalidStateError' || /pending/i.test(String(err && err.message)))) {   // the aborted earlier prompt is still closing: once more shortly
         setTimeout(function () { if (gen === bioGen) { bioState = 'idle'; bioScan(auto, true); } }, 300); return;
       }
       if (auto && name === 'NotAllowedError' && Date.now() - t0 < 800) { bioState = 'tap'; bioDraw(); return; }   // iOS refuses a scan without a tap: ask for one
-      bioState = 'idle'; padSay('สแกนไม่สำเร็จ ใส่รหัส PIN หรือสแกนอีกครั้ง'); bioDraw();
+      bioState = 'idle'; padSay('สแกนไม่สำเร็จ ใส่รหัส PIN หรือสแกนอีกครั้ง'); bioDraw(); padBad();
     });
   }
   /** the offer sheet: mode 'ask' (the question) or 'confirm' (iOS: the phone gave no secret on create, one more tap runs the scan) */
@@ -1247,18 +1271,18 @@ if (typeof document !== 'undefined') (function () {
   function bioInit() {
     var raw = store.get(KBIO); bioRec = L.bioParse(raw);
     if (raw && !bioRec) store.del(KBIO);   // a damaged record is just dropped
-    $('bioTap').addEventListener('click', function () { bioScan(false); });
-    $('bioAgain').addEventListener('click', function () { if (padBusy) return; bioScan(false); });
+    $('bioTap').addEventListener('click', function () { tick(); bioScan(false); });
+    $('bioAgain').addEventListener('click', function () { if (padBusy) return; tick(); bioScan(false); });
     $('bioPinLink').addEventListener('click', function () { bioCancel(); padSay(''); bioDraw(); });
     $('bioToggle').addEventListener('click', function () {
       if (bioRec) { bioDelete(); store.set(KBION, '1'); toast('ปิดการสแกนแล้ว'); bioDrawFoot(); return; }
-      bioEnable(function (ok) { if (ok) toast('เปิดใช้ ' + L.bioLabel(navigator.userAgent) + ' แล้ว'); bioDrawFoot(); });
+      bioEnable(function (ok) { if (ok) { buzzOk(); toast('เปิดใช้ ' + L.bioLabel(navigator.userAgent) + ' แล้ว', undefined, 'ok'); } bioDrawFoot(); });
     });
     $('bioOfferYes').addEventListener('click', function () {
       $('bioOffer').hidden = true;
-      bioEnable(function (ok) { if (ok) toast('เปิดใช้ ' + L.bioLabel(navigator.userAgent) + ' แล้ว'); bioDrawFoot(); });
+      bioEnable(function (ok) { if (ok) { buzzOk(); toast('เปิดใช้ ' + L.bioLabel(navigator.userAgent) + ' แล้ว', undefined, 'ok'); } bioDrawFoot(); });
     });
-    $('bioOfferConfirm').addEventListener('click', function () { var cb = bioTapCb; bioTapCb = null; $('bioOffer').hidden = true; if (cb) cb.go(); });   // the scan starts right here, inside the tap
+    $('bioOfferConfirm').addEventListener('click', function () { tick(); var cb = bioTapCb; bioTapCb = null; $('bioOffer').hidden = true; if (cb) cb.go(); });   // the scan starts right here, inside the tap
     $('bioOfferNo').addEventListener('click', function () { store.set(KBION, '1'); bioOfferClose(); bioDrawFoot(); });
     if (!bioLite()) { bioSupport = false; return; }
     try {   // the stable passkey user id: first 16 bytes of SHA-256(token), ready before the tap (iOS wants create() inside the tap)
@@ -1357,7 +1381,7 @@ if (typeof document !== 'undefined') (function () {
   function waitMsg() { return offline ? 'รอสักครู่ ยังไม่มีสัญญาณ' : 'รอสักครู่ กำลังตรวจรหัส'; }
   function onBoot(res, fromPad) {
     var c = L.classify(res);
-    if (c === 'ok') { PIN = PIN === null || PIN === undefined ? null : PIN; acceptBoot(res, false); if (switching()) reboot(); return; }   // (a place switch that the pad interrupted goes on)
+    if (c === 'ok') { var go = function () { PIN = PIN === null || PIN === undefined ? null : PIN; acceptBoot(res, false); if (switching()) reboot(); }; if (fromPad) padWin(go); else go(); return; }   // (a place switch that the pad interrupted goes on; a code typed or scanned on the pad shows green first)
     if (c === 'pin') {
       var locked = res.code === 'LOCK';
       if (res.code === 'SETPIN') { pendingPin = null; showPad('', false, true); return; }   // choose a code first (nothing was typed wrong)
